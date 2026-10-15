@@ -1,6 +1,7 @@
 <?php
 /**
- * Resource abilities carry their MCP metadata in both places adapters read it.
+ * Resource abilities carry their MCP metadata in both places adapters read it,
+ * and run without input.
  *
  * Newer MCP adapters (0.5.0+) read `mcp.uri` / `mcp.annotations` and log a
  * deprecation warning on every server build when they fall back to the
@@ -50,6 +51,19 @@ class Test_Resource_Meta extends WP_UnitTestCase {
 			$this->assertEquals( array_filter( $meta['annotations'], $set ), $meta['mcp']['annotations'] ?? null, "{$name}: mcp.annotations" );
 			$this->assertTrue( $meta['mcp']['annotations']['readonly'] );
 			$this->assertTrue( $meta['show_in_rest'] );
+		}
+	}
+
+	/**
+	 * Resources run with no input, as MCP adapter 0.7.0 calls them, instead of
+	 * failing `{ type: object }` validation on `null`.
+	 */
+	public function test_resources_run_without_input() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		foreach ( array_keys( $this->resources() ) as $name ) {
+			$result = wp_get_ability( $name )->execute( null );
+			$this->assertNotWPError( $result, is_wp_error( $result ) ? "{$name}: " . $result->get_error_message() : '' );
+			$this->assertIsArray( $result, $name );
 		}
 	}
 

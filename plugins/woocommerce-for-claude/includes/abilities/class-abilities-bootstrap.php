@@ -55,6 +55,37 @@ class AbilitiesBootstrap {
 	}
 
 	/**
+	 * Return the meta for a read-only ability exposed as an MCP resource.
+	 *
+	 * The MCP adapter moved resource metadata under `mcp` in 0.5.0: newer
+	 * adapters read `mcp.uri` / `mcp.annotations` and log a deprecation
+	 * warning, on every server build, when they have to fall back to the
+	 * top-level keys (issue #117). The copy vendored in WooCommerce (10.6
+	 * through at least 11.2) still reads only the top-level `uri` and
+	 * `annotations`, so both locations are set: newer adapters find the
+	 * `mcp` values first and stay quiet, older ones keep working.
+	 *
+	 * @param string $uri Resource URI.
+	 * @return array<string, mixed>
+	 */
+	public static function resource_meta( $uri ) {
+		$annotations = array(
+			'readonly'   => true,
+			'idempotent' => true,
+		);
+
+		return array(
+			'uri'          => $uri,
+			'annotations'  => $annotations,
+			'mcp'          => array(
+				'uri'         => $uri,
+				'annotations' => $annotations,
+			),
+			'show_in_rest' => true,
+		);
+	}
+
+	/**
 	 * Register the ability category. Must be called on the
 	 * wp_abilities_api_categories_init action (separate from the ability
 	 * init hook).

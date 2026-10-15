@@ -37,14 +37,7 @@ class StoreProfileAbility {
 				'input_schema'        => AbilitiesBootstrap::empty_input_schema(),
 				'execute_callback'    => array( __CLASS__, 'execute' ),
 				'permission_callback' => array( __CLASS__, 'permission_check' ),
-				'meta'                => array(
-					'uri'          => self::RESOURCE_URI,
-					'annotations'  => array(
-						'readonly'   => true,
-						'idempotent' => true,
-					),
-					'show_in_rest' => true,
-				),
+				'meta'                => AbilitiesBootstrap::resource_meta( self::RESOURCE_URI ),
 			)
 		);
 	}

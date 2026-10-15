@@ -55,6 +55,52 @@ class AbilitiesBootstrap {
 	}
 
 	/**
+	 * Return the input schema for an ability exposed as an MCP resource.
+	 *
+	 * Resources take no input, and MCP adapter 0.7.0 runs them with none
+	 * (`null`), which fails `{ type: object }` validation ("input is not of
+	 * type object"), so every resources/read errored. Core substitutes a
+	 * schema's `default` for missing input, so an empty-object default lets
+	 * the read through on every adapter.
+	 *
+	 * @return array<string, mixed>
+	 */
+	public static function resource_input_schema() {
+		return self::empty_input_schema() + array( 'default' => (object) array() );
+	}
+
+	/**
+	 * Return the meta for a read-only ability exposed as an MCP resource.
+	 *
+	 * The MCP adapter moved resource metadata under `mcp` in 0.5.0: newer
+	 * adapters read `mcp.uri` / `mcp.annotations` and log a deprecation
+	 * warning, on every server build, when they have to fall back to the
+	 * top-level keys (issue #117). The copy vendored in WooCommerce (10.6
+	 * through at least 11.2) still reads only the top-level `uri` and
+	 * `annotations`, so both locations are set: newer adapters find the
+	 * `mcp` values first and stay quiet, older ones keep working.
+	 *
+	 * @param string $uri Resource URI.
+	 * @return array<string, mixed>
+	 */
+	public static function resource_meta( $uri ) {
+		$annotations = array(
+			'readonly'   => true,
+			'idempotent' => true,
+		);
+
+		return array(
+			'uri'          => $uri,
+			'annotations'  => $annotations,
+			'mcp'          => array(
+				'uri'         => $uri,
+				'annotations' => $annotations,
+			),
+			'show_in_rest' => true,
+		);
+	}
+
+	/**
 	 * Register the ability category. Must be called on the
 	 * wp_abilities_api_categories_init action (separate from the ability
 	 * init hook).

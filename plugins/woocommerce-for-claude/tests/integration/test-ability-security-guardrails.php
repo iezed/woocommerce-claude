@@ -74,6 +74,7 @@ class Test_Ability_Security_Guardrails extends WP_UnitTestCase {
 		'woocommerce-claude/',
 		'wc-knowledge/',
 		'wc-prompts/',
+		'briefing/',
 	);
 
 	/**

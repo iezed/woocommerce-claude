@@ -27,6 +27,7 @@ PLUGIN_DIR="$WP_CORE_DIR/wp-content/plugins"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PLUGIN_SOURCE_DIR="$REPO_DIR/plugins/woocommerce-for-claude"
 HEY_WOO_SOURCE_DIR="$REPO_DIR/plugins/hey-woo"
+BRIEFING_SOURCE_DIR="$REPO_DIR/plugins/briefing-for-woocommerce"
 
 # Resolve "latest" to a concrete semver string (needed for the SVN tag path).
 if [ "$WP_VERSION" = "latest" ]; then
@@ -96,3 +97,4 @@ fi
 # ── Plugin under test ──────────────────────────────────────────────────────────
 ln -sfn "$PLUGIN_SOURCE_DIR" "$PLUGIN_DIR/woocommerce-claude"
 ln -sfn "$HEY_WOO_SOURCE_DIR" "$PLUGIN_DIR/hey-woo"
+ln -sfn "$BRIEFING_SOURCE_DIR" "$PLUGIN_DIR/briefing-for-woocommerce"

@@ -26,7 +26,7 @@ jobs:
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ~/.cache/composer
-          key: ${{ runner.os }}-composer-${{ hashFiles('plugins/woocommerce-for-claude/composer.json', 'plugins/woocommerce-for-claude/composer.lock', 'plugins/hey-woo/composer.json', 'plugins/hey-woo/composer.lock', 'php-packages/*/composer.json') }}
+          key: ${{ runner.os }}-composer-${{ hashFiles('plugins/woocommerce-for-claude/composer.json', 'plugins/woocommerce-for-claude/composer.lock', 'plugins/hey-woo/composer.json', 'plugins/hey-woo/composer.lock', 'plugins/briefing-for-woocommerce/composer.json', 'plugins/briefing-for-woocommerce/composer.lock', 'php-packages/*/composer.json') }}
           restore-keys: ${{ runner.os }}-composer-
 
       - name: Composer install
@@ -43,6 +43,13 @@ jobs:
 
       - name: Run PHPCS for Hey Woo
         run: plugins/woocommerce-for-claude/vendor/bin/phpcs --standard=plugins/woocommerce-for-claude/phpcs.xml.dist --runtime-set text_domain hey-woo plugins/hey-woo/hey-woo.php plugins/hey-woo/includes
+
+      - name: Validate Briefing for WooCommerce Composer metadata
+        working-directory: plugins/briefing-for-woocommerce
+        run: composer validate --strict
+
+      - name: Run PHPCS for Briefing for WooCommerce
+        run: plugins/woocommerce-for-claude/vendor/bin/phpcs --standard=plugins/woocommerce-for-claude/phpcs.xml.dist --runtime-set text_domain briefing-for-woocommerce plugins/briefing-for-woocommerce/briefing-for-woocommerce.php plugins/briefing-for-woocommerce/includes
 
       - name: Verify release package contract
         run: ./bin/check-release-contract
@@ -85,7 +92,7 @@ jobs:
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ~/.cache/composer
-          key: ${{ runner.os }}-composer-${{ hashFiles('plugins/woocommerce-for-claude/composer.json', 'plugins/woocommerce-for-claude/composer.lock', 'plugins/hey-woo/composer.json', 'plugins/hey-woo/composer.lock', 'php-packages/*/composer.json') }}
+          key: ${{ runner.os }}-composer-${{ hashFiles('plugins/woocommerce-for-claude/composer.json', 'plugins/woocommerce-for-claude/composer.lock', 'plugins/hey-woo/composer.json', 'plugins/hey-woo/composer.lock', 'plugins/briefing-for-woocommerce/composer.json', 'plugins/briefing-for-woocommerce/composer.lock', 'php-packages/*/composer.json') }}
           restore-keys: ${{ runner.os }}-composer-
 
       - name: Composer install

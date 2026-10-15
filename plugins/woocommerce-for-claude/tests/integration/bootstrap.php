@@ -51,6 +51,10 @@ function woocommerce_claude_tests_load_plugins() {
 
 	require_once $plugin_dir . '/woocommerce-claude/woocommerce-claude.php';
 
+	// Briefing for WooCommerce shares the commerce-abilities package; loading it
+	// here keeps every test running with both plugins active, as a store could be.
+	require_once $plugin_dir . '/briefing-for-woocommerce/briefing-for-woocommerce.php';
+
 	// Prevent WooCommerce's own check_version() hook (plugins_loaded) from
 	// running WC_Install::install() before we have a chance to set the HPOS
 	// options below.  We do the controlled install ourselves in the init hook.

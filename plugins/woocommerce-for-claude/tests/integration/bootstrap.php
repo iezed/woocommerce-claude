@@ -53,6 +53,9 @@ function woocommerce_claude_tests_load_plugins() {
 
 	// Briefing for WooCommerce shares the commerce-abilities package; loading it
 	// here keeps every test running with both plugins active, as a store could be.
+	// CI symlinks the plugin in; register its real path as WordPress does when it loads a
+	// symlinked plugin, so plugin_basename() (which the updater matches on) resolves.
+	wp_register_plugin_realpath( $plugin_dir . '/briefing-for-woocommerce/briefing-for-woocommerce.php' );
 	require_once $plugin_dir . '/briefing-for-woocommerce/briefing-for-woocommerce.php';
 
 	// Prevent WooCommerce's own check_version() hook (plugins_loaded) from

@@ -28,6 +28,16 @@ WooCommerce for Claude is a general connector for Claude: about a dozen tools, r
 - Deactivating the plugin revokes every key approved for Briefing (keys WooCommerce described as `Briefing for WooCommerce… - API (…)`).
 - No settings, no admin screens, no background work, nothing stored.
 
+## Updates
+
+The plugin updates itself like one from WordPress.org. Its `Update URI` header (`https://briefing.woocommerce.com/`) sends WordPress's update check to `Updater`, which asks `https://briefing.woocommerce.com/api/plugin/update` for the latest release (cached six hours; a failed check, one hour). WordPress compares versions and shows the update; auto-updates are switched on at activation and the merchant can turn them off on the Plugins screen. Only this repo's release assets are accepted as the package (`…/releases/download/briefing-for-woocommerce-v<version>/briefing-for-woocommerce.zip`), whatever the site says.
+
+### Releasing
+
+1. Bump the version in the plugin header, `BRIEFING_FOR_WOOCOMMERCE_VERSION` and `package.json` on a PR, and merge it.
+2. Run the **Release Briefing for WooCommerce** workflow with that version. It builds the zip and publishes the `briefing-for-woocommerce-v<version>` release.
+3. Bump `PLUGIN_VERSION` in the Briefing app's `shared/plugin.ts` and publish the app. Installed stores pick the update up within about twelve hours (WordPress's own check interval), sooner from the Plugins screen.
+
 ## Development
 
 Lives in the woocommerce-claude monorepo next to WooCommerce for Claude and Hey Woo. wp-env mounts it and activates it; its tests are in `plugins/woocommerce-for-claude/tests/integration/test-briefing-for-woocommerce.php` (the integration bootstrap loads both plugins). Build the release zip from the repo root:

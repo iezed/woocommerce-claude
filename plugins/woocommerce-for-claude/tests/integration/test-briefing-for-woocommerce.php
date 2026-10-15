@@ -307,6 +307,172 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 	}
 
 	/**
+	 * WordPress's own update check offers a newer release from the Briefing site,
+	 * through the Update URI header.
+	 */
+	public function test_wordpress_offers_newer_release() {
+		$this->fake_latest( $this->release( '9.9.9' ) );
+		wp_update_plugins();
+
+		$file    = plugin_basename( BRIEFING_FOR_WOOCOMMERCE_PLUGIN_FILE );
+		$updates = get_site_transient( 'update_plugins' );
+		$this->assertArrayHasKey( $file, $updates->response, 'A newer release shows as an update.' );
+		$this->assertSame( '9.9.9', $updates->response[ $file ]->new_version );
+		$this->assertSame( $this->release( '9.9.9' )['package'], $updates->response[ $file ]->package );
+	}
+
+	/**
+	 * The release already installed isn't offered.
+	 */
+	public function test_wordpress_ignores_same_release() {
+		$this->fake_latest( $this->release( BRIEFING_FOR_WOOCOMMERCE_VERSION ) );
+		wp_update_plugins();
+
+		$updates = get_site_transient( 'update_plugins' );
+		$this->assertArrayNotHasKey( plugin_basename( BRIEFING_FOR_WOOCOMMERCE_PLUGIN_FILE ), $updates->response );
+	}
+
+	/**
+	 * Only this repo's matching release asset is accepted as a package, and
+	 * versions must look like versions.
+	 */
+	public function test_only_release_assets_are_accepted() {
+		$good = $this->release( '1.2.3' );
+		$this->assertSame( '1.2.3', \WooCommerce\Briefing\Updater::valid( $good )['version'] );
+		foreach ( array(
+			array( 'package' => 'https://evil.example/briefing-for-woocommerce.zip' ),
+			array( 'package' => \WooCommerce\Briefing\Updater::PACKAGE_PREFIX . '1.2.4/briefing-for-woocommerce.zip' ),
+			array( 'package' => 'http://github.com/woocommerce/woocommerce-claude/releases/download/briefing-for-woocommerce-v1.2.3/briefing-for-woocommerce.zip' ),
+			array( 'version' => '1.2.3; rm' ),
+		) as $bad ) {
+			$this->assertNull( \WooCommerce\Briefing\Updater::valid( array_merge( $good, $bad ) ), wp_json_encode( $bad ) );
+		}
+		$this->assertNull( \WooCommerce\Briefing\Updater::valid( 'nope' ) );
+	}
+
+	/**
+	 * A failed check offers nothing and is remembered for an hour, so a down
+	 * site isn't asked on every page load.
+	 */
+	public function test_failed_check_is_cached() {
+		$calls = 0;
+		add_filter(
+			'pre_http_request',
+			function ( $pre, $args, $url ) use ( &$calls ) {
+				if ( \WooCommerce\Briefing\Updater::LATEST_URL !== $url ) {
+					return $pre;
+				}
+				++$calls;
+				return new WP_Error( 'http_request_failed', 'down' );
+			},
+			10,
+			3
+		);
+		delete_site_transient( \WooCommerce\Briefing\Updater::TRANSIENT );
+
+		$this->assertNull( \WooCommerce\Briefing\Updater::latest() );
+		$this->assertNull( \WooCommerce\Briefing\Updater::latest() );
+		$this->assertSame( 1, $calls );
+		$this->assertFalse( \WooCommerce\Briefing\Updater::update( false, array(), plugin_basename( BRIEFING_FOR_WOOCOMMERCE_PLUGIN_FILE ) ) );
+	}
+
+	/**
+	 * Other plugins' update checks are left alone.
+	 */
+	public function test_other_plugins_untouched() {
+		$this->fake_latest( $this->release( '9.9.9' ) );
+		$this->assertSame( 'theirs', \WooCommerce\Briefing\Updater::update( 'theirs', array(), 'someone-else/plugin.php' ) );
+		$this->assertSame( 'theirs', \WooCommerce\Briefing\Updater::details( 'theirs', 'plugin_information', (object) array( 'slug' => 'someone-else' ) ) );
+	}
+
+	/**
+	 * "View details" describes the latest release.
+	 */
+	public function test_details_box() {
+		$this->fake_latest( $this->release( '9.9.9' ) );
+		$info = \WooCommerce\Briefing\Updater::details( false, 'plugin_information', (object) array( 'slug' => 'briefing-for-woocommerce' ) );
+		$this->assertSame( '9.9.9', $info->version );
+		$this->assertSame( $this->release( '9.9.9' )['package'], $info->download_link );
+		$this->assertStringContainsString( 'briefing-for-woocommerce-v9.9.9', $info->sections['changelog'] );
+	}
+
+	/**
+	 * Activation turns auto-updates on, once, keeping other plugins' choices.
+	 */
+	public function test_activation_turns_on_auto_updates() {
+		update_site_option( 'auto_update_plugins', array( 'someone-else/plugin.php' ) );
+		\WooCommerce\Briefing\Updater::enable_auto_updates();
+		\WooCommerce\Briefing\Updater::enable_auto_updates();
+		$this->assertSame(
+			array( 'someone-else/plugin.php', plugin_basename( BRIEFING_FOR_WOOCOMMERCE_PLUGIN_FILE ) ),
+			get_site_option( 'auto_update_plugins' )
+		);
+	}
+
+	/**
+	 * A release description as the Briefing site sends it.
+	 *
+	 * @param string $version Version.
+	 * @return array
+	 */
+	private function release( $version ) {
+		return array(
+			'version'      => $version,
+			'package'      => \WooCommerce\Briefing\Updater::PACKAGE_PREFIX . $version . '/briefing-for-woocommerce.zip',
+			'requires'     => '6.9',
+			'tested'       => '6.9',
+			'requires_php' => '7.4',
+		);
+	}
+
+	/**
+	 * Answer the Briefing site's latest-release URL with `$release`, and
+	 * WordPress.org's update API with nothing.
+	 *
+	 * @param array $release Release description.
+	 */
+	private function fake_latest( array $release ) {
+		delete_site_transient( \WooCommerce\Briefing\Updater::TRANSIENT );
+		delete_site_transient( 'update_plugins' );
+		add_filter(
+			'pre_http_request',
+			function ( $pre, $args, $url ) use ( $release ) {
+				if ( \WooCommerce\Briefing\Updater::LATEST_URL === $url ) {
+					return array(
+						'headers'  => array(),
+						'body'     => wp_json_encode( $release ),
+						'response' => array(
+							'code'    => 200,
+							'message' => 'OK',
+						),
+						'cookies'  => array(),
+					);
+				}
+				if ( false !== strpos( $url, 'api.wordpress.org/plugins/update-check' ) ) {
+					return array(
+						'headers'  => array(),
+						'body'     => wp_json_encode(
+							array(
+								'plugins'      => array(),
+								'translations' => array(),
+								'no_update'    => array(),
+							)
+						),
+						'response' => array(
+							'code'    => 200,
+							'message' => 'OK',
+						),
+						'cookies'  => array(),
+					);
+				}
+				return $pre;
+			},
+			10,
+			3
+		);
+	}
+
+	/**
 	 * Product IDs in a stock-at-risk result.
 	 *
 	 * @param array $input Tool input.

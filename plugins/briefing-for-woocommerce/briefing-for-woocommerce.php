@@ -13,6 +13,7 @@
  * WC requires at least: 10.6
  * WC tested up to: 10.7
  * Requires Plugins: woocommerce
+ * Update URI: https://briefing.woocommerce.com/
  * License: GPL-3.0-or-later
  * License URI: https://www.gnu.org/licenses/gpl-3.0.html
  *
@@ -26,6 +27,11 @@ define( 'BRIEFING_FOR_WOOCOMMERCE_PLUGIN_FILE', __FILE__ );
 define( 'BRIEFING_FOR_WOOCOMMERCE_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 
 briefing_for_woocommerce_load_commerce_abilities();
+
+// Updates come from the Briefing site (see the Update URI header), with or without WooCommerce active.
+require_once BRIEFING_FOR_WOOCOMMERCE_PLUGIN_DIR . 'includes/class-updater.php';
+\WooCommerce\Briefing\Updater::init();
+register_activation_hook( __FILE__, array( \WooCommerce\Briefing\Updater::class, 'enable_auto_updates' ) );
 
 /**
  * Load the shared commerce-abilities classes the briefing reads through.

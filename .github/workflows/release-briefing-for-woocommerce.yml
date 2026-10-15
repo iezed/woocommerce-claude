@@ -1,0 +1,133 @@
+name: Release Briefing for WooCommerce
+
+# Produce the distributable Briefing for WooCommerce plugin zip from
+# plugins/briefing-for-woocommerce and publish it as a GitHub Release.
+#
+# Installed copies update themselves from this release: the plugin's Update URI
+# asks https://briefing.woocommerce.com/api/plugin/update for the latest version,
+# and that answers with this release's asset URL
+# (.../releases/download/briefing-for-woocommerce-v<version>/briefing-for-woocommerce.zip).
+# The Briefing app's shared/plugin.ts names the latest version; bump it after a
+# release is published.
+#
+# Trigger: manual workflow_dispatch only, with its own tag namespace.
+#
+# Prerequisites:
+#   - The `version` input must match the plugin's `Version:` header,
+#     BRIEFING_FOR_WOOCOMMERCE_VERSION and package.json.
+#   - The tag `briefing-for-woocommerce-v<version>` must not already exist.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version, e.g. 0.1.0 (must match plugins/briefing-for-woocommerce/briefing-for-woocommerce.php)'
+        required: true
+        type: string
+      draft:
+        description: 'Create the Release as a draft (review/edit before publishing)'
+        type: boolean
+        default: false
+      prerelease:
+        description: 'Mark the Release as a pre-release'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # required for softprops/action-gh-release to create the tag + Release
+
+jobs:
+  release:
+    name: Build and release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Validate version input matches the plugin
+        run: |
+          INPUT_VERSION="${{ inputs.version }}"
+          INPUT_VERSION="${INPUT_VERSION#v}"
+
+          PLUGIN_DIR="plugins/briefing-for-woocommerce"
+          PLUGIN_FILE="${PLUGIN_DIR}/briefing-for-woocommerce.php"
+          HEADER_VERSION="$(awk '/^ \* Version:/ { print $3; exit }' "${PLUGIN_FILE}")"
+          CONSTANT_VERSION="$(sed -n "s/^define( 'BRIEFING_FOR_WOOCOMMERCE_VERSION', '\\([^']*\\)' );/\\1/p" "${PLUGIN_FILE}")"
+          PACKAGE_VERSION="$(php -r 'echo json_decode(file_get_contents($argv[1]), true)["version"];' "${PLUGIN_DIR}/package.json")"
+
+          for pair in "Version header:${HEADER_VERSION}" "BRIEFING_FOR_WOOCOMMERCE_VERSION:${CONSTANT_VERSION}" "package.json:${PACKAGE_VERSION}"; do
+            if [[ "${INPUT_VERSION}" != "${pair##*:}" ]]; then
+              echo "ERROR: input version '${INPUT_VERSION}' does not match ${pair%%:*} ('${pair##*:}')." >&2
+              echo "       Bump all three on a PR first, merge it, then re-run this workflow." >&2
+              exit 1
+            fi
+          done
+
+          echo "VERSION=${INPUT_VERSION}" >> "$GITHUB_ENV"
+          echo "TAG_NAME=briefing-for-woocommerce-v${INPUT_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Verify tag does not already exist
+        run: |
+          if git rev-parse -q --verify "refs/tags/${TAG_NAME}" > /dev/null 2>&1; then
+            echo "ERROR: tag ${TAG_NAME} already exists locally in this checkout" >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "${TAG_NAME}" > /dev/null 2>&1; then
+            echo "ERROR: tag ${TAG_NAME} already exists on origin" >&2
+            echo "       Either bump the version or delete the existing tag." >&2
+            exit 1
+          fi
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 10.33.0
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+        with:
+          php-version: '7.4'
+          tools: composer:v2
+          coverage: none
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Briefing for WooCommerce plugin zip
+        run: pnpm run briefing-plugin-zip
+
+      - name: Verify zip was produced
+        run: |
+          if [ ! -f briefing-for-woocommerce.zip ]; then
+            echo "ERROR: briefing-for-woocommerce.zip not found" >&2
+            exit 1
+          fi
+          unzip -t briefing-for-woocommerce.zip
+          # WordPress installs the update into the folder named by the zip's root.
+          unzip -l briefing-for-woocommerce.zip | grep -q ' briefing-for-woocommerce/briefing-for-woocommerce.php$' || { echo "ERROR: zip root must be briefing-for-woocommerce/" >&2; exit 1; }
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: briefing-for-woocommerce-${{ env.VERSION }}
+          path: briefing-for-woocommerce.zip
+          retention-days: 30
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
+        with:
+          tag_name: ${{ env.TAG_NAME }}
+          name: Briefing for WooCommerce v${{ env.VERSION }}
+          target_commitish: ${{ github.sha }}
+          files: briefing-for-woocommerce.zip
+          generate_release_notes: true
+          draft: ${{ inputs.draft }}
+          prerelease: ${{ inputs.prerelease }}

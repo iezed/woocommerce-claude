@@ -1,0 +1,28 @@
+{
+    "name": "woocommerce/briefing-for-woocommerce",
+    "description": "Read-only store totals for Briefing for WooCommerce's weekly briefing.",
+    "type": "wordpress-plugin",
+    "license": "GPL-3.0-or-later",
+    "require": {
+        "php": ">=7.4",
+        "woocommerce/commerce-abilities": "0.2.0"
+    },
+    "repositories": [
+        {
+            "type": "path",
+            "url": "../../php-packages/commerce-abilities",
+            "options": {
+                "symlink": false,
+                "versions": {
+                    "woocommerce/commerce-abilities": "0.2.0"
+                }
+            }
+        }
+    ],
+    "config": {
+        "platform": {
+            "php": "7.4.0"
+        },
+        "sort-packages": true
+    }
+}

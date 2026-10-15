@@ -40,7 +40,7 @@ class Test_Ability_Description_Guardrails extends WP_UnitTestCase {
 	 *
 	 * @var array<int, string>
 	 */
-	const SCOPED_PREFIXES = array( 'wc-analytics/', 'woocommerce-claude/', 'wc-prompts/' );
+	const SCOPED_PREFIXES = array( 'wc-analytics/', 'woocommerce-claude/', 'wc-prompts/', 'briefing/' );
 
 	/**
 	 * Subset of SCOPED_PREFIXES restricted to tool-shaped abilities —
@@ -52,7 +52,7 @@ class Test_Ability_Description_Guardrails extends WP_UnitTestCase {
 	 *
 	 * @var array<int, string>
 	 */
-	const TOOL_DESCRIPTION_PREFIXES = array( 'wc-analytics/', 'woocommerce-claude/' );
+	const TOOL_DESCRIPTION_PREFIXES = array( 'wc-analytics/', 'woocommerce-claude/', 'briefing/' );
 
 	/**
 	 * Tool names that may legitimately appear after a `→` follow-up arrow

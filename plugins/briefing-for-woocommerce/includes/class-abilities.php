@@ -115,14 +115,14 @@ class Abilities {
 		self::add(
 			self::TOTALS,
 			__( 'Totals', 'briefing-for-woocommerce' ),
-			__( 'Headline totals for a period against the one before: revenue, orders (with statuses), customers (new and returning), customer value (lifetime and repeat buying, no individual customers), tax (collected, refunded and net, by rate) or refunds.', 'briefing-for-woocommerce' ),
+			__( 'Headline totals for a period against the one before: revenue, orders (with statuses), customers (new and returning), customer value (lifetime and repeat buying, no individual customers), tax (collected, refunded and net, by rate), refunds, customer concentration (share of revenue from the top 10 customers and the top fifth, by spend in the period), fulfilment (hours from payment to completion: median, p90, buckets) or margin (from cost of goods, with how much of revenue has costs entered). Can\'t answer: who a customer is, or anything about one order or one customer; those stay in the store\'s admin.', 'briefing-for-woocommerce' ),
 			array(
 				'type'       => 'object',
 				'required'   => array( 'subject', 'date_start', 'date_end' ),
 				'properties' => array(
 					'subject' => array(
 						'type' => 'string',
-						'enum' => array( 'revenue', 'orders', 'customers', 'customer_value', 'tax', 'refunds' ),
+						'enum' => array( 'revenue', 'orders', 'customers', 'customer_value', 'tax', 'refunds', 'customer_concentration', 'fulfilment', 'margin' ),
 					),
 				) + $dates,
 			),
@@ -132,18 +132,18 @@ class Abilities {
 		self::add(
 			self::BREAKDOWN,
 			__( 'Breakdown', 'briefing-for-woocommerce' ),
-			__( 'One subject broken down by one dimension for a period against the one before: sales by category, country, payment or shipping method; attribution by channel, source, campaign or device; products by product or variation; refunds by product or country; tax by rate; coupons by code.', 'briefing-for-woocommerce' ),
+			__( 'One subject broken down by one dimension for a period: revenue by category, country, state (billing state or region), shipping_country, payment or shipping method; attribution by channel, source, campaign or device; products by product or variation; refunds by product, country or customer_type (new or returning); tax by rate; coupons by code; customers by country (new and returning); cohorts of first-time customers by the channel, coupon or product of their first order (repeat rate, average lifetime spend); product_pairs by pair (products bought together); fulfilment by shipping_method. Can\'t answer: who the customers in a group are, or anything about one order or one customer; those stay in the store\'s admin.', 'briefing-for-woocommerce' ),
 			array(
 				'type'       => 'object',
 				'required'   => array( 'subject', 'dimension', 'date_start', 'date_end' ),
 				'properties' => array(
 					'subject'   => array(
 						'type' => 'string',
-						'enum' => array( 'revenue', 'attribution', 'products', 'refunds', 'tax', 'coupons' ),
+						'enum' => array( 'revenue', 'attribution', 'products', 'refunds', 'tax', 'coupons', 'customers', 'cohorts', 'product_pairs', 'fulfilment' ),
 					),
 					'dimension' => array(
 						'type' => 'string',
-						'enum' => array( 'category', 'country', 'payment_method', 'shipping_method', 'channel', 'source', 'medium', 'campaign', 'device', 'channel_source', 'product', 'variation', 'rate', 'code' ),
+						'enum' => array( 'category', 'country', 'state', 'shipping_country', 'payment_method', 'shipping_method', 'channel', 'source', 'medium', 'campaign', 'device', 'channel_source', 'product', 'variation', 'rate', 'code', 'customer_type', 'coupon', 'pair' ),
 					),
 					'limit'     => array(
 						'type'    => 'integer',

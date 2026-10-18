@@ -4836,6 +4836,9 @@ class AnalyticsService {
 				return self::query_revenue_by_category( $date_start, $date_end, $limit, $orderby, $include_unassigned );
 			case 'country':
 				return self::query_revenue_by_country( $date_start, $date_end, $limit, $orderby, $include_unassigned );
+			case 'state':
+			case 'shipping_country':
+				return self::query_revenue_by_address( $date_start, $date_end, $limit, $orderby, $include_unassigned, $group_by );
 			case 'payment_method':
 				return self::query_revenue_by_payment_method( $date_start, $date_end, $limit, $orderby, $include_unassigned );
 			case 'shipping_method':
@@ -4970,7 +4973,9 @@ class AnalyticsService {
 				return (int) $count;
 
 			case 'country':
-				$addr_join = self::revenue_breakdown_country_join( 'os' );
+			case 'state':
+			case 'shipping_country':
+				$addr_join = self::revenue_breakdown_address_join( 'os', $group_by );
 				$count     = $wpdb->get_var(
 					$wpdb->prepare(
 						"SELECT COUNT(DISTINCT os.order_id)
@@ -5069,7 +5074,9 @@ class AnalyticsService {
 				return (int) $count;
 
 			case 'country':
-				$addr_join = self::revenue_breakdown_country_join( 'os' );
+			case 'state':
+			case 'shipping_country':
+				$addr_join = self::revenue_breakdown_address_join( 'os', $group_by );
 				$count     = $wpdb->get_var(
 					$wpdb->prepare(
 						"SELECT COUNT(DISTINCT {$addr_join['expr']})
@@ -5184,6 +5191,114 @@ class AnalyticsService {
 				AND addr_billing.meta_key = '_billing_country'",
 			'expr' => 'addr_billing.meta_value',
 		);
+	}
+
+	/**
+	 * JOIN clause + SELECT expression for an address dimension: billing
+	 * country, billing state ("US:CA", country-qualified so states with the
+	 * same code in two countries stay apart) or shipping country. Refund
+	 * sub-orders read their parent's address, as the country join does.
+	 *
+	 * @param string $os_alias Alias of the wc_order_stats table in the outer query.
+	 * @param string $group_by country | state | shipping_country.
+	 * @return array { join: string, expr: string }
+	 */
+	private static function revenue_breakdown_address_join( $os_alias, $group_by ) {
+		global $wpdb;
+
+		if ( 'country' === $group_by ) {
+			return self::revenue_breakdown_country_join( $os_alias );
+		}
+
+		$order_id = "(CASE WHEN {$os_alias}.parent_id = 0 THEN {$os_alias}.order_id ELSE {$os_alias}.parent_id END)";
+
+		if ( self::hpos_enabled() ) {
+			$addr_table = $wpdb->prefix . 'wc_order_addresses';
+			$type       = 'shipping_country' === $group_by ? 'shipping' : 'billing';
+			return array(
+				'join' => "LEFT JOIN {$addr_table} addr_{$type}
+					ON addr_{$type}.order_id = {$order_id}
+					AND addr_{$type}.address_type = '{$type}'",
+				'expr' => 'shipping_country' === $group_by
+					? 'addr_shipping.country'
+					: "(CASE WHEN addr_billing.state IS NULL OR addr_billing.state = '' THEN NULL ELSE CONCAT(addr_billing.country, ':', addr_billing.state) END)",
+			);
+		}
+
+		if ( 'shipping_country' === $group_by ) {
+			return array(
+				'join' => "LEFT JOIN {$wpdb->postmeta} addr_shipping
+					ON addr_shipping.post_id = {$order_id}
+					AND addr_shipping.meta_key = '_shipping_country'",
+				'expr' => 'addr_shipping.meta_value',
+			);
+		}
+
+		return array(
+			'join' => "LEFT JOIN {$wpdb->postmeta} addr_billing
+					ON addr_billing.post_id = {$order_id}
+					AND addr_billing.meta_key = '_billing_country'
+				LEFT JOIN {$wpdb->postmeta} addr_billing_state
+					ON addr_billing_state.post_id = {$order_id}
+					AND addr_billing_state.meta_key = '_billing_state'",
+			'expr' => "(CASE WHEN addr_billing_state.meta_value IS NULL OR addr_billing_state.meta_value = '' THEN NULL ELSE CONCAT(addr_billing.meta_value, ':', addr_billing_state.meta_value) END)",
+		);
+	}
+
+	/**
+	 * Revenue by billing state / region or by shipping country. Same
+	 * order-level roll-up as country; state rows are keyed "US:CA" and
+	 * labelled with WooCommerce's state name ("California, US").
+	 *
+	 * @param string $date_start         YYYY-MM-DD start.
+	 * @param string $date_end           YYYY-MM-DD end.
+	 * @param int    $limit              Top N.
+	 * @param string $orderby            Sort metric.
+	 * @param bool   $include_unassigned Include (Unassigned) row for orders with no value.
+	 * @param string $group_by           state | shipping_country.
+	 * @return array Top group rows.
+	 */
+	private static function query_revenue_by_address( $date_start, $date_end, $limit, $orderby, $include_unassigned, $group_by ) {
+		global $wpdb;
+
+		$addr = self::revenue_breakdown_address_join( 'os', $group_by );
+		$rows = self::query_revenue_breakdown_order_level(
+			$date_start,
+			$date_end,
+			$limit,
+			$orderby,
+			$include_unassigned,
+			$wpdb->prefix . 'wc_order_stats',
+			$addr['join'],
+			$addr['expr'],
+			$group_by
+		);
+
+		if ( 'state' !== $group_by ) {
+			return $rows;
+		}
+
+		foreach ( $rows as $i => $row ) {
+			$rows[ $i ]['label'] = self::state_label( $row['key'] );
+		}
+		return $rows;
+	}
+
+	/**
+	 * Human-readable label for a "CC:STATE" key: "California, US", or the
+	 * raw state code when WooCommerce has no name for it.
+	 *
+	 * @param string $key Country-qualified state key.
+	 * @return string
+	 */
+	public static function state_label( $key ) {
+		if ( false === strpos( (string) $key, ':' ) ) {
+			return (string) $key;
+		}
+		list( $country, $state ) = explode( ':', $key, 2 );
+		$states                  = function_exists( 'WC' ) && WC()->countries ? WC()->countries->get_states( $country ) : array();
+		$name                    = is_array( $states ) && isset( $states[ $state ] ) ? html_entity_decode( $states[ $state ], ENT_QUOTES ) : $state;
+		return $name . ', ' . $country;
 	}
 
 	/**
@@ -6697,6 +6812,8 @@ class AnalyticsService {
 				return self::query_refund_top_groups_product( $date_start, $date_end, $limit );
 			case 'country':
 				return self::query_refund_top_groups_country( $date_start, $date_end, $limit, $include_unassigned );
+			case 'customer_type':
+				return self::query_refund_top_groups_customer_type( $date_start, $date_end );
 		}
 		return array();
 	}
@@ -6894,6 +7011,79 @@ class AnalyticsService {
 			},
 			$rows
 		);
+	}
+
+	/**
+	 * Refunds split by whether the refunded order came from a new or a
+	 * returning customer (the order's returning_customer flag, set when the
+	 * order was placed). gross_revenue is the same group's paid revenue in
+	 * the period, so refund_rate_percent compares like with like.
+	 *
+	 * @param string $date_start YYYY-MM-DD start.
+	 * @param string $date_end   YYYY-MM-DD end.
+	 * @return array Two rows at most: new, returning.
+	 */
+	private static function query_refund_top_groups_customer_type( $date_start, $date_end ) {
+		global $wpdb;
+
+		$os_table      = $wpdb->prefix . 'wc_order_stats';
+		$paid_statuses = self::get_paid_statuses();
+		$paid_ph       = implode( ', ', array_fill( 0, count( $paid_statuses ), '%s' ) );
+		$date_column   = self::get_date_column();
+		$report_range  = self::get_report_date_range_sql( '', $date_start, $date_end );
+
+		$refunds = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT
+					COALESCE(parent.returning_customer, refund.returning_customer, 0) AS returning_customer,
+					ABS(SUM(refund.net_total + refund.tax_total + refund.shipping_total)) AS refunds_amount,
+					COUNT(*) AS refunds_count,
+					COUNT(DISTINCT refund.parent_id) AS orders_refunded_count,
+					AVG(DATEDIFF(refund.date_created, parent.{$date_column})) AS avg_days_to_refund
+				FROM {$os_table} refund
+				LEFT JOIN {$os_table} parent ON parent.order_id = refund.parent_id AND parent.parent_id = 0
+				WHERE refund.parent_id != 0
+					AND refund.date_created >= %s
+					AND refund.date_created <= %s
+				GROUP BY 1",
+				$date_start . ' 00:00:00',
+				$date_end . ' 23:59:59'
+			),
+			ARRAY_A
+		);
+		$paid    = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT returning_customer, SUM(net_total) AS gross_revenue
+				FROM {$os_table}
+				WHERE parent_id = 0 AND status IN ({$paid_ph}) AND {$report_range}
+				GROUP BY returning_customer",
+				$paid_statuses
+			),
+			ARRAY_A
+		);
+
+		$gross = array();
+		foreach ( (array) $paid as $row ) {
+			$gross[ (int) $row['returning_customer'] ] = (float) $row['gross_revenue'];
+		}
+
+		$rows = array();
+		foreach ( (array) $refunds as $row ) {
+			$flag                 = (int) $row['returning_customer'];
+			$row['gross_revenue'] = $gross[ $flag ] ?? 0.0;
+			$rows[]               = self::shape_refund_group_row(
+				$flag ? 'returning' : 'new',
+				$flag ? 'Returning customers' : 'New customers',
+				$row
+			);
+		}
+		usort(
+			$rows,
+			function ( $a, $b ) {
+				return $b['refunds_amount'] <=> $a['refunds_amount'];
+			}
+		);
+		return $rows;
 	}
 
 	/**

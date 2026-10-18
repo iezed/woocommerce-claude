@@ -4,15 +4,15 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "4c2c11c0273e7f7607a4c71c50165a81",
+    "content-hash": "d9d5cc93920e35628af27db502d825be",
     "packages": [
         {
             "name": "woocommerce/commerce-abilities",
-            "version": "0.2.0",
+            "version": "0.3.0",
             "dist": {
                 "type": "path",
                 "url": "../../php-packages/commerce-abilities",
-                "reference": "3dab90025941c94291be53579856607104a9ed2c"
+                "reference": "8a52857c93596e0932ac510b83ee837b78667e50"
             },
             "require": {
                 "php": ">=7.4"

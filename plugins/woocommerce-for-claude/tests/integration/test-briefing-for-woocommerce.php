@@ -427,6 +427,54 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 	}
 
 	/**
+	 * The new totals come through the Briefing tools unchanged apart from
+	 * person keys, and a guest's email never leaves the concentration query.
+	 */
+	public function test_new_totals_match_the_shared_tools() {
+		foreach ( array( 'Big.Spender@example.test', 'big.spender@example.test' ) as $i => $email ) {
+			$order = wc_create_order();
+			$order->set_billing_email( $email );
+			$order->set_total( 500 );
+			$order->set_status( 'completed' );
+			$order->set_date_created( '2026-03-0' . ( 3 + $i ) . ' 10:00:00' );
+			$order->set_date_paid( '2026-03-0' . ( 3 + $i ) . ' 10:00:00' );
+			$order->save();
+			\Automattic\WooCommerce\Admin\API\Reports\Orders\Stats\DataStore::sync_order( $order->get_id() );
+		}
+		$this->seed_paid_order(
+			array(
+				'customer_id' => $this->seed_customer(),
+				'total'       => 100,
+				'date'        => '2026-03-05 12:00:00',
+			)
+		);
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$week = array(
+			'date_start' => '2026-03-02',
+			'date_end'   => '2026-03-08',
+		);
+
+		$ours = wp_get_ability( Abilities::TOTALS )->execute( array( 'subject' => 'customer_concentration' ) + $week );
+		$this->assertIsArray( $ours, is_wp_error( $ours ) ? $ours->get_error_message() : '' );
+		$this->assertSame( 2, $ours['metrics']['customers_count'], 'The guest is one customer across both orders.' );
+		$this->assertSame( 90.9, $ours['metrics']['top_20_percent_share_percent'] );
+		$this->assertStringNotContainsString( 'big.spender', strtolower( wp_json_encode( $ours ) ) );
+		$this->assertSame(
+			Abilities::without_people( \WooCommerce\CommerceAbilities\Abilities\AnalyticsTotalsAbility::execute( array( 'subject' => 'customer_concentration' ) + $week ) ),
+			$ours
+		);
+
+		$cohorts = wp_get_ability( Abilities::BREAKDOWN )->execute(
+			array(
+				'subject'   => 'cohorts',
+				'dimension' => 'coupon',
+			) + $week
+		);
+		$this->assertIsArray( $cohorts, is_wp_error( $cohorts ) ? $cohorts->get_error_message() : '' );
+		$this->assertSame( 'cohorts', $cohorts['subject'] );
+	}
+
+	/**
 	 * No tool output, for any subject, carries a person key, an email address or
 	 * a pseudonymised customer label.
 	 */
@@ -682,16 +730,20 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 	private function every_tool_call() {
 		$week  = $this->recent_range( 7 );
 		$calls = array();
-		foreach ( array( 'revenue', 'orders', 'customers', 'customer_value', 'tax', 'refunds' ) as $subject ) {
+		foreach ( array( 'revenue', 'orders', 'customers', 'customer_value', 'tax', 'refunds', 'customer_concentration', 'fulfilment', 'margin' ) as $subject ) {
 			$calls[ "totals {$subject}" ] = array( Abilities::TOTALS, array( 'subject' => $subject ) + $week );
 		}
 		foreach ( array(
-			'revenue'     => array( 'category', 'country', 'payment_method', 'shipping_method' ),
-			'attribution' => array( 'channel' ),
-			'products'    => array( 'product', 'variation' ),
-			'refunds'     => array( 'product', 'country' ),
-			'tax'         => array( 'rate' ),
-			'coupons'     => array( 'code' ),
+			'revenue'       => array( 'category', 'country', 'state', 'shipping_country', 'payment_method', 'shipping_method' ),
+			'attribution'   => array( 'channel' ),
+			'products'      => array( 'product', 'variation' ),
+			'refunds'       => array( 'product', 'country', 'customer_type' ),
+			'tax'           => array( 'rate' ),
+			'coupons'       => array( 'code' ),
+			'customers'     => array( 'country' ),
+			'cohorts'       => array( 'channel', 'coupon', 'product' ),
+			'product_pairs' => array( 'pair' ),
+			'fulfilment'    => array( 'shipping_method' ),
 		) as $subject => $dimensions ) {
 			foreach ( $dimensions as $dimension ) {
 				$calls[ "breakdown {$subject} by {$dimension}" ] = array(

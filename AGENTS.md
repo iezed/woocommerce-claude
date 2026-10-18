@@ -148,6 +148,8 @@ composer update --working-dir=plugins/hey-woo woocommerce/commerce-abilities --n
 composer update --working-dir=plugins/briefing-for-woocommerce woocommerce/commerce-abilities --no-progress --prefer-dist
 ```
 
+A new class file under `php-packages/commerce-abilities/src/` also has to be added to the class list in each plugin's loader (`woocommerce_claude_load_commerce_abilities()`, Hey Woo's and Briefing's equivalents): there's no autoloader at runtime, so a missing entry is a fatal "class not found" only in the plugin that forgot it.
+
 `composer update` only re-mirrors when the package's version changes. For a second edit at the same version, PHPUnit silently runs against the stale vendor copy — use `composer reinstall --working-dir=<plugin> woocommerce/commerce-abilities` instead, and `diff` the source file against `plugins/<plugin>/vendor/woocommerce/commerce-abilities/...` if in doubt.
 
 ### Report dates: use the report-date helpers, not the raw date column

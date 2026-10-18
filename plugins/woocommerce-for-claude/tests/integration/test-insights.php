@@ -84,7 +84,12 @@ class Test_Insights extends WP_UnitTestCase {
 		$this->order( $this->seed_customer(), 100, '2026-02-25 10:00:00' );
 		$this->order( $this->seed_customer(), 300, '2026-03-03 10:00:00' );
 
-		$result = AnalyticsTotalsAbility::execute( array( 'subject' => 'customer_concentration', 'compare' => true ) + self::WEEK );
+		$result = AnalyticsTotalsAbility::execute(
+			array(
+				'subject' => 'customer_concentration',
+				'compare' => true,
+			) + self::WEEK
+		);
 		$this->assertSame( 1, $result['comparison']['metrics']['customers_count'] );
 		$this->assertSame( 'percentage_points', $result['comparison']['changes']['top_10_share_percent']['unit'] );
 		$this->assertNotNull( $result['note'], 'Ten or fewer customers is called out.' );
@@ -193,19 +198,19 @@ class Test_Insights extends WP_UnitTestCase {
 	 * Products bought together, counted by orders.
 	 */
 	public function test_product_pairs() {
-		$mug   = $this->seed_simple_product(
+		$mug     = $this->seed_simple_product(
 			array(
 				'name'  => 'Pair mug',
 				'price' => 10,
 			)
 		);
-		$tee   = $this->seed_simple_product(
+		$tee     = $this->seed_simple_product(
 			array(
 				'name'  => 'Pair tee',
 				'price' => 20,
 			)
 		);
-		$socks = $this->seed_simple_product(
+		$socks   = $this->seed_simple_product(
 			array(
 				'name'  => 'Pair socks',
 				'price' => 5,
@@ -339,8 +344,22 @@ class Test_Insights extends WP_UnitTestCase {
 	 * The shared tools refuse a dimension that doesn't belong to the subject.
 	 */
 	public function test_dimensions_are_checked() {
-		$this->assertWPError( AnalyticsBreakdownAbility::execute( array( 'subject' => 'cohorts', 'dimension' => 'country' ) + self::WEEK ) );
-		$this->assertWPError( AnalyticsBreakdownAbility::execute( array( 'subject' => 'customers', 'dimension' => 'state' ) + self::WEEK ) );
+		$this->assertWPError(
+			AnalyticsBreakdownAbility::execute(
+				array(
+					'subject'   => 'cohorts',
+					'dimension' => 'country',
+				) + self::WEEK
+			)
+		);
+		$this->assertWPError(
+			AnalyticsBreakdownAbility::execute(
+				array(
+					'subject'   => 'customers',
+					'dimension' => 'state',
+				) + self::WEEK
+			)
+		);
 	}
 
 	/**

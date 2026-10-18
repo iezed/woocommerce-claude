@@ -82,7 +82,7 @@ class Plugin {
 	}
 
 	/**
-	 * Register the briefing's MCP server: the five read tools, no resources, no prompts.
+	 * Register the briefing's MCP server: the read tools, no resources, no prompts.
 	 *
 	 * @param object $adapter The McpAdapter instance.
 	 */

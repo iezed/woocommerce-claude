@@ -3,7 +3,7 @@
  * Plugin Name: Briefing for WooCommerce
  * Plugin URI: https://briefing.woocommerce.com/
  * Description: Lets Briefing for WooCommerce read your store's weekly totals, with a read-only key you approve. Only totals and breakdowns ever leave the store — never orders, customers, names or emails.
- * Version: 0.1.0
+ * Version: 0.2.0
  * Author: Automattic
  * Author URI: https://automattic.com/
  * Text Domain: briefing-for-woocommerce
@@ -22,7 +22,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'BRIEFING_FOR_WOOCOMMERCE_VERSION', '0.1.0' );
+define( 'BRIEFING_FOR_WOOCOMMERCE_VERSION', '0.2.0' );
 define( 'BRIEFING_FOR_WOOCOMMERCE_PLUGIN_FILE', __FILE__ );
 define( 'BRIEFING_FOR_WOOCOMMERCE_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 

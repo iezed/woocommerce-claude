@@ -96,7 +96,9 @@ trait AnalyticsFixtures {
 	 *                   attribution (array keyed by short name: channel / source /
 	 *                   medium / campaign / term / content / device — values are
 	 *                   strings; missing keys leave no meta row for that dimension,
-	 *                   which is how `include_unassigned` gets exercised).
+	 *                   which is how `include_unassigned` gets exercised),
+	 *                   billing_country / billing_state / billing_email /
+	 *                   shipping_country / shipping_state (strings).
 	 * @return WC_Order The saved and synced order.
 	 */
 	protected function seed_paid_order( array $args ) {
@@ -148,6 +150,14 @@ trait AnalyticsFixtures {
 					continue;
 				}
 				$order->update_meta_data( self::$attribution_meta_key_map[ $short_key ], (string) $value );
+			}
+		}
+
+		// Addresses: billing_country / billing_state / billing_email and
+		// shipping_country / shipping_state, when a test needs them.
+		foreach ( array( 'billing_country', 'billing_state', 'billing_email', 'shipping_country', 'shipping_state' ) as $address_key ) {
+			if ( isset( $args[ $address_key ] ) ) {
+				$order->{'set_' . $address_key}( (string) $args[ $address_key ] );
 			}
 		}
 

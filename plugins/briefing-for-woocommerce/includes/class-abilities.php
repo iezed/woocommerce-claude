@@ -1,6 +1,6 @@
 <?php
 /**
- * The briefing's five read abilities.
+ * The briefing's read abilities.
  *
  * @package WooCommerce\Briefing
  */
@@ -17,11 +17,13 @@ defined( 'ABSPATH' ) || exit;
 /**
  * Everything Briefing for WooCommerce can read from a store.
  *
- * The three analytics tools wrap the shared `wc-analytics/*` implementations
- * with narrower inputs, and take out anything about an individual person on
- * the way back (the totals tool's pseudonymised top customers, for one). Stock
- * is a fixed question rather than the shared rows tool, which can list orders
- * and customers. Store profile returns only the six facts the briefing uses.
+ * The analytics tools wrap the shared `wc-analytics/*` implementations with
+ * narrower inputs, and take out anything about an individual person on the way
+ * back (the totals tool's pseudonymised top customers, for one). The rows tool
+ * wraps the shared rows tool but only lists products: orders and customers come
+ * back as counts and sums, and a filter that matches fewer than MIN_GROUP of
+ * them returns the count alone. Store profile returns only the six facts the
+ * briefing uses.
  */
 class Abilities {
 
@@ -32,11 +34,38 @@ class Abilities {
 	const SERIES        = 'briefing/series';
 	const STORE_PROFILE = 'briefing/store-profile';
 	const STOCK_AT_RISK = 'briefing/stock-at-risk';
+	const ROWS          = 'briefing/rows';
 
 	/**
 	 * The tools on the MCP server, and nothing else.
 	 */
-	const TOOLS = array( self::TOTALS, self::BREAKDOWN, self::SERIES, self::STORE_PROFILE, self::STOCK_AT_RISK );
+	const TOOLS = array( self::TOTALS, self::BREAKDOWN, self::SERIES, self::STORE_PROFILE, self::STOCK_AT_RISK, self::ROWS );
+
+	/**
+	 * The rows tool has no large-range gate, so the plugin caps its dates: a
+	 * range of at most ROWS_MAX_DAYS days, starting no more than
+	 * ROWS_MAX_YEARS_BACK years ago and ending no later than today.
+	 */
+	const ROWS_MAX_DAYS       = 366;
+	const ROWS_MAX_YEARS_BACK = 3;
+
+	/**
+	 * Most product rows the rows tool lists.
+	 */
+	const ROWS_MAX_LIMIT = 25;
+
+	/**
+	 * Fewest orders or customers a rows-tool aggregate reports sums for. A
+	 * filter matching fewer returns the count alone, so a narrow filter can't
+	 * read back one customer's spend or one order's total.
+	 */
+	const MIN_GROUP = 3;
+
+	/**
+	 * Rows-tool filter fields that point at one person or household rather
+	 * than a group.
+	 */
+	const IDENTIFYING_FIELDS = array( 'customer_id', 'city', 'postcode', 'billing_city', 'billing_postcode' );
 
 	/**
 	 * Keys removed from every analytics response, at any depth: per-person
@@ -61,7 +90,7 @@ class Abilities {
 	}
 
 	/**
-	 * Register the five abilities (on `wp_abilities_api_init`).
+	 * Register the abilities (on `wp_abilities_api_init`).
 	 */
 	public static function register() {
 		if ( ! function_exists( 'wp_register_ability' ) ) {
@@ -86,14 +115,14 @@ class Abilities {
 		self::add(
 			self::TOTALS,
 			__( 'Totals', 'briefing-for-woocommerce' ),
-			__( 'Headline totals for a period against the one before: revenue, orders (with statuses), customers (new and returning), customer value (lifetime and repeat buying, no individual customers) or refunds.', 'briefing-for-woocommerce' ),
+			__( 'Headline totals for a period against the one before: revenue, orders (with statuses), customers (new and returning), customer value (lifetime and repeat buying, no individual customers), tax (collected, refunded and net, by rate) or refunds.', 'briefing-for-woocommerce' ),
 			array(
 				'type'       => 'object',
 				'required'   => array( 'subject', 'date_start', 'date_end' ),
 				'properties' => array(
 					'subject' => array(
 						'type' => 'string',
-						'enum' => array( 'revenue', 'orders', 'customers', 'customer_value', 'refunds' ),
+						'enum' => array( 'revenue', 'orders', 'customers', 'customer_value', 'tax', 'refunds' ),
 					),
 				) + $dates,
 			),
@@ -103,18 +132,18 @@ class Abilities {
 		self::add(
 			self::BREAKDOWN,
 			__( 'Breakdown', 'briefing-for-woocommerce' ),
-			__( 'One subject broken down by one dimension for a period against the one before: sales by category, country, payment or shipping method; attribution by channel, source, campaign or device; products by product or variation; refunds by product or country; coupons by code.', 'briefing-for-woocommerce' ),
+			__( 'One subject broken down by one dimension for a period against the one before: sales by category, country, payment or shipping method; attribution by channel, source, campaign or device; products by product or variation; refunds by product or country; tax by rate; coupons by code.', 'briefing-for-woocommerce' ),
 			array(
 				'type'       => 'object',
 				'required'   => array( 'subject', 'dimension', 'date_start', 'date_end' ),
 				'properties' => array(
 					'subject'   => array(
 						'type' => 'string',
-						'enum' => array( 'revenue', 'attribution', 'products', 'refunds', 'coupons' ),
+						'enum' => array( 'revenue', 'attribution', 'products', 'refunds', 'tax', 'coupons' ),
 					),
 					'dimension' => array(
 						'type' => 'string',
-						'enum' => array( 'category', 'country', 'payment_method', 'shipping_method', 'channel', 'source', 'medium', 'campaign', 'device', 'channel_source', 'product', 'variation', 'code' ),
+						'enum' => array( 'category', 'country', 'payment_method', 'shipping_method', 'channel', 'source', 'medium', 'campaign', 'device', 'channel_source', 'product', 'variation', 'rate', 'code' ),
 					),
 					'limit'     => array(
 						'type'    => 'integer',
@@ -194,6 +223,61 @@ class Abilities {
 				),
 			),
 			array( __CLASS__, 'stock_at_risk' )
+		);
+
+		self::add(
+			self::ROWS,
+			__( 'Rows', 'briefing-for-woocommerce' ),
+			__( 'Filtered questions the other tools can\'t shape, such as "orders over £100 from Germany with a coupon" or "products over £50 that sold fewer than 3". Orders and customers come back as counts and sums only (mode "aggregate"): never a list, and only the count when fewer than 3 match. Products can also be listed (mode "rows", at most 25). Filters can\'t use customer IDs, cities or postcodes. Dates: at most 366 days, starting no more than 3 years ago and ending no later than today.', 'briefing-for-woocommerce' ),
+			array(
+				'type'       => 'object',
+				'required'   => array( 'entity', 'date_start', 'date_end' ),
+				'properties' => array(
+					'entity'     => array(
+						'type' => 'string',
+						'enum' => array( 'orders', 'products', 'customers' ),
+					),
+					'mode'       => array(
+						'type'    => 'string',
+						'enum'    => array( 'aggregate', 'rows' ),
+						'default' => 'aggregate',
+					),
+					'filters'    => array(
+						'type'     => 'array',
+						'maxItems' => 10,
+						'items'    => array(
+							'type'       => 'object',
+							'required'   => array( 'field', 'operator' ),
+							'properties' => array(
+								'field'    => array( 'type' => 'string' ),
+								'operator' => array( 'type' => 'string' ),
+								'value'    => array( 'type' => array( 'string', 'number', 'boolean', 'array' ) ),
+							),
+						),
+						'default'  => array(),
+					),
+					'match'      => array(
+						'type'    => 'string',
+						'enum'    => array( 'all', 'any' ),
+						'default' => 'all',
+					),
+					'limit'      => array(
+						'type'    => 'integer',
+						'minimum' => 1,
+						'maximum' => self::ROWS_MAX_LIMIT,
+						'default' => 10,
+					),
+					'orderby'    => array( 'type' => 'string' ),
+					'order'      => array(
+						'type'    => 'string',
+						'enum'    => array( 'ASC', 'DESC' ),
+						'default' => 'DESC',
+					),
+					'date_start' => $dates['date_start'],
+					'date_end'   => $dates['date_end'],
+				),
+			),
+			array( __CLASS__, 'rows' )
 		);
 	}
 
@@ -345,6 +429,165 @@ class Abilities {
 				)
 			)
 		);
+	}
+
+	/**
+	 * `briefing/rows`: the shared rows tool, with its dates capped, product
+	 * rows only, no identifying filters, and sums withheld for groups smaller
+	 * than MIN_GROUP.
+	 *
+	 * @param array $input Validated input.
+	 * @return array|\WP_Error
+	 */
+	public static function rows( $input ) {
+		$input  = self::pick( $input, array( 'entity', 'mode', 'filters', 'match', 'limit', 'orderby', 'order', 'date_start', 'date_end' ) );
+		$entity = $input['entity'] ?? '';
+		$mode   = $input['mode'] ?? 'aggregate';
+
+		$dates = self::check_rows_dates( $input['date_start'] ?? '', $input['date_end'] ?? '' );
+		if ( is_wp_error( $dates ) ) {
+			return $dates;
+		}
+
+		if ( 'aggregate' !== $mode && 'products' !== $entity ) {
+			return new \WP_Error(
+				'briefing_rows_aggregate_only',
+				sprintf(
+					/* translators: %s: orders or customers. */
+					__( 'Briefing for WooCommerce reads %s as totals only. Use mode "aggregate" for counts and sums; individual orders and customers stay in the store\'s admin.', 'briefing-for-woocommerce' ),
+					$entity
+				),
+				array( 'status' => 400 )
+			);
+		}
+
+		$filters = is_array( $input['filters'] ?? null ) ? $input['filters'] : array();
+		foreach ( $filters as $filter ) {
+			$field = is_array( $filter ) ? (string) ( $filter['field'] ?? '' ) : '';
+			if ( in_array( $field, self::IDENTIFYING_FIELDS, true ) ) {
+				return new \WP_Error(
+					'briefing_rows_identifying_filter',
+					sprintf(
+						/* translators: %s: filter field name. */
+						__( 'Briefing for WooCommerce can\'t filter on "%s": it can point at a single customer. Use country or state instead.', 'briefing-for-woocommerce' ),
+						$field
+					),
+					array( 'status' => 400 )
+				);
+			}
+		}
+
+		$result = AnalyticsRowsAbility::execute(
+			array(
+				'entity'     => $entity,
+				'mode'       => $mode,
+				'filters'    => $filters,
+				'match'      => $input['match'] ?? 'all',
+				'limit'      => min( self::ROWS_MAX_LIMIT, (int) ( $input['limit'] ?? 10 ) ),
+				'orderby'    => $input['orderby'] ?? '',
+				'order'      => $input['order'] ?? 'DESC',
+				'date_start' => $dates['start'],
+				'date_end'   => $dates['end'],
+			)
+		);
+		if ( is_wp_error( $result ) ) {
+			return $result;
+		}
+		if ( 'products' !== $entity ) {
+			$result['rows'] = null;
+			$result         = self::without_small_groups( $result );
+		}
+		return self::without_people( $result );
+	}
+
+	/**
+	 * Check the rows tool's dates against its caps, in the store's time zone.
+	 *
+	 * @param string $date_start Start, YYYY-MM-DD.
+	 * @param string $date_end   End, YYYY-MM-DD.
+	 * @return array|\WP_Error { start, end } or an error saying which cap was hit.
+	 */
+	public static function check_rows_dates( $date_start, $date_end ) {
+		$tz    = wp_timezone();
+		$start = \DateTimeImmutable::createFromFormat( '!Y-m-d', (string) $date_start, $tz );
+		$end   = \DateTimeImmutable::createFromFormat( '!Y-m-d', (string) $date_end, $tz );
+		if ( ! $start || ! $end || $start->format( 'Y-m-d' ) !== $date_start || $end->format( 'Y-m-d' ) !== $date_end ) {
+			return self::rows_date_error( __( 'date_start and date_end must be real dates in YYYY-MM-DD form.', 'briefing-for-woocommerce' ) );
+		}
+
+		$today    = new \DateTimeImmutable( 'today', $tz );
+		$earliest = $today->modify( '-' . self::ROWS_MAX_YEARS_BACK . ' years' );
+		if ( $start > $end ) {
+			return self::rows_date_error( __( 'date_start must be on or before date_end.', 'briefing-for-woocommerce' ) );
+		}
+		if ( $end > $today ) {
+			return self::rows_date_error(
+				/* translators: %s: today's date. */
+				sprintf( __( 'date_end can\'t be later than today (%s).', 'briefing-for-woocommerce' ), $today->format( 'Y-m-d' ) )
+			);
+		}
+		if ( $start < $earliest ) {
+			return self::rows_date_error(
+				/* translators: 1: number of years, 2: earliest allowed date. */
+				sprintf( __( 'date_start can be at most %1$d years ago (%2$s or later).', 'briefing-for-woocommerce' ), self::ROWS_MAX_YEARS_BACK, $earliest->format( 'Y-m-d' ) )
+			);
+		}
+		$days = (int) $start->diff( $end )->days + 1;
+		if ( $days > self::ROWS_MAX_DAYS ) {
+			return self::rows_date_error(
+				/* translators: 1: requested days, 2: maximum days. */
+				sprintf( __( 'The range is %1$d days; the most this tool reads at once is %2$d.', 'briefing-for-woocommerce' ), $days, self::ROWS_MAX_DAYS )
+			);
+		}
+
+		return array(
+			'start' => $start->format( 'Y-m-d' ),
+			'end'   => $end->format( 'Y-m-d' ),
+		);
+	}
+
+	/**
+	 * A rows-tool date error.
+	 *
+	 * @param string $message Message.
+	 * @return \WP_Error
+	 */
+	private static function rows_date_error( $message ) {
+		return new \WP_Error( 'briefing_rows_date_range', $message, array( 'status' => 400 ) );
+	}
+
+	/**
+	 * Withhold sums for an orders or customers aggregate that matched fewer
+	 * than MIN_GROUP: keep the counts, drop the money and anything a sum could
+	 * be worked back from.
+	 *
+	 * @param array $result Rows-tool aggregate response.
+	 * @return array
+	 */
+	public static function without_small_groups( array $result ) {
+		$matched = (int) ( $result['summary']['matched_count'] ?? 0 );
+		if ( $matched > 0 && $matched < self::MIN_GROUP ) {
+			$result['summary']           = array( 'matched_count' => $matched );
+			$result['share_of_universe'] = array_intersect_key(
+				(array) ( $result['share_of_universe'] ?? array() ),
+				array_flip( array( 'share_of_orders_percent', 'share_of_customers_percent' ) )
+			);
+			$result['pipeline']          = null;
+			$result['admin_equivalent']  = null;
+			$result['note']              = sprintf(
+				'Only %d matched, so only the count is given: sums and averages for fewer than %d would describe individual customers or orders.',
+				$matched,
+				self::MIN_GROUP
+			);
+			return $result;
+		}
+		foreach ( array( 'pipeline', 'admin_equivalent' ) as $key ) {
+			$count = (int) ( $result[ $key ]['matched_count'] ?? 0 );
+			if ( $count > 0 && $count < self::MIN_GROUP ) {
+				$result[ $key ] = array( 'matched_count' => $count );
+			}
+		}
+		return $result;
 	}
 
 	/**

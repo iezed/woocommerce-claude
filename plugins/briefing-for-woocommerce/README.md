@@ -6,17 +6,18 @@ The merchant connects from the Briefing site and approves a **read-only** key on
 
 ## What it can read
 
-Five tools, and nothing else:
+Six tools, and nothing else:
 
 | Tool | What it answers |
 |---|---|
-| `briefing/totals` | Revenue, orders (with statuses), customers (new and returning), customer value, refunds — for a period against the one before |
-| `briefing/breakdown` | One subject by one dimension: sales by category, country, payment or shipping method; attribution by channel, source, campaign or device; products by product or variation; refunds; coupons |
+| `briefing/totals` | Revenue, orders (with statuses), customers (new and returning), customer value, tax, refunds — for a period against the one before |
+| `briefing/breakdown` | One subject by one dimension: sales by category, country, payment or shipping method; attribution by channel, source, campaign or device; products by product or variation; refunds; tax by rate; coupons |
 | `briefing/series` | Customers or top products by day, week or month |
 | `briefing/store-profile` | Store name, currency, time zone, country, and whether order tables (HPOS) are on |
 | `briefing/stock-at-risk` | Products that sold in the period and are now out of stock, on backorder, or nearly out |
+| `briefing/rows` | Filtered questions ("orders over £100 from Germany with a coupon"): counts and sums for orders and customers, or a short list of products (at most 25). At most 366 days, starting no more than three years ago and ending no later than today |
 
-**Totals, never people.** The analytics tools wrap the shared `wc-analytics/*` implementations in `php-packages/commerce-abilities`, with narrower inputs, and remove anything about an individual on the way out (such as the pseudonymised top-customer list in customer value). Stock at risk is a fixed question about products, so unlike the shared rows tool it can't be pointed at orders or customers. No order, customer, name or email leaves the store.
+**Totals, never people.** The analytics tools wrap the shared `wc-analytics/*` implementations in `php-packages/commerce-abilities`, with narrower inputs, and remove anything about an individual on the way out (such as the pseudonymised top-customer list in customer value). The rows tool lists products only: for orders and customers it returns counts and sums, never a list, and when a filter matches fewer than three it returns the count alone, so a narrow filter can't read back one customer's spend or one order's total. It also refuses filters on customer IDs, cities and postcodes. No order, customer, name or email leaves the store.
 
 ## How it differs from WooCommerce for Claude
 

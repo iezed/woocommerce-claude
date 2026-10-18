@@ -55,9 +55,9 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 
 	/**
 	 * The server lives at /wp-json/briefing-for-woocommerce/mcp with exactly the
-	 * five tools, and no resources or prompts.
+	 * briefing's tools, and no resources or prompts.
 	 */
-	public function test_server_exposes_exactly_the_five_tools() {
+	public function test_server_exposes_exactly_the_briefing_tools() {
 		$server = \WP\MCP\Core\McpAdapter::instance()->get_server( Plugin::MCP_SERVER_ID );
 		$this->assertNotNull( $server, 'Briefing MCP server must be registered.' );
 		$this->assertSame( 'briefing-for-woocommerce', $server->get_server_route_namespace() );
@@ -69,7 +69,7 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 		}
 		sort( $names );
 		$this->assertSame(
-			array( 'briefing-breakdown', 'briefing-series', 'briefing-stock-at-risk', 'briefing-store-profile', 'briefing-totals' ),
+			array( 'briefing-breakdown', 'briefing-rows', 'briefing-series', 'briefing-stock-at-risk', 'briefing-store-profile', 'briefing-totals' ),
 			$names
 		);
 		$this->assertCount( 0, $server->get_resources() );
@@ -191,12 +191,277 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
 		$result = wp_get_ability( Abilities::TOTALS )->execute(
 			array(
-				'subject'    => 'tax',
+				'subject'    => 'top_customers',
 				'date_start' => '2026-03-02',
 				'date_end'   => '2026-03-08',
 			)
 		);
 		$this->assertWPError( $result );
+	}
+
+	/**
+	 * Tax totals and the per-rate breakdown come through, matching the shared
+	 * tools.
+	 */
+	public function test_tax_totals_and_breakdown() {
+		$rate = $this->seed_tax_rate(
+			array(
+				'country' => 'GB',
+				'name'    => 'VAT',
+				'rate'    => '20.0000',
+			)
+		);
+		$this->seed_paid_order(
+			array(
+				'customer_id' => $this->seed_customer(),
+				'total'       => 120,
+				'date'        => '2026-03-04 12:00:00',
+				'tax_total'   => 20,
+				'tax_rate_id' => $rate,
+			)
+		);
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$week = array(
+			'date_start' => '2026-03-02',
+			'date_end'   => '2026-03-08',
+		);
+
+		$totals = wp_get_ability( Abilities::TOTALS )->execute( array( 'subject' => 'tax' ) + $week );
+		$this->assertIsArray( $totals, is_wp_error( $totals ) ? $totals->get_error_message() : '' );
+		$this->assertSame( 'tax', $totals['subject'] );
+		$this->assertSame(
+			Abilities::without_people( \WooCommerce\CommerceAbilities\Abilities\AnalyticsTotalsAbility::execute( array( 'subject' => 'tax' ) + $week ) ),
+			$totals
+		);
+
+		$breakdown = wp_get_ability( Abilities::BREAKDOWN )->execute(
+			array(
+				'subject'   => 'tax',
+				'dimension' => 'rate',
+			) + $week
+		);
+		$this->assertIsArray( $breakdown, is_wp_error( $breakdown ) ? $breakdown->get_error_message() : '' );
+		$this->assertSame( 'rate', $breakdown['dimension'] );
+	}
+
+	/**
+	 * Orders and customers are aggregate-only on the rows tool; products can be
+	 * listed.
+	 */
+	public function test_rows_lists_products_only() {
+		$product = $this->seed_simple_product(
+			array(
+				'name'  => 'Listed mug',
+				'price' => 10,
+			)
+		);
+		$this->seed_paid_order(
+			array(
+				'customer_id' => $this->seed_customer(),
+				'total'       => 0,
+				'date'        => $this->days_ago( 2 ) . ' 12:00:00',
+				'items'       => array(
+					array(
+						'product_id' => $product,
+						'qty'        => 1,
+					),
+				),
+			)
+		);
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$recent = $this->recent_range( 7 );
+
+		foreach ( array( 'orders', 'customers' ) as $entity ) {
+			$result = wp_get_ability( Abilities::ROWS )->execute(
+				array(
+					'entity' => $entity,
+					'mode'   => 'rows',
+				) + $recent
+			);
+			$this->assertWPError( $result, $entity );
+			$this->assertSame( 'briefing_rows_aggregate_only', $result->get_error_code(), $entity );
+
+			$aggregate = wp_get_ability( Abilities::ROWS )->execute( array( 'entity' => $entity ) + $recent );
+			$this->assertIsArray( $aggregate, is_wp_error( $aggregate ) ? $aggregate->get_error_message() : $entity );
+			$this->assertSame( 'aggregate', $aggregate['mode'] );
+			$this->assertNull( $aggregate['rows'], $entity );
+		}
+
+		$products = wp_get_ability( Abilities::ROWS )->execute(
+			array(
+				'entity' => 'products',
+				'mode'   => 'rows',
+				'limit'  => 5,
+			) + $recent
+		);
+		$this->assertIsArray( $products, is_wp_error( $products ) ? $products->get_error_message() : '' );
+		$this->assertContains( $product, array_map( 'intval', wp_list_pluck( $products['rows'], 'product_id' ) ) );
+
+		$too_many = wp_get_ability( Abilities::ROWS )->execute(
+			array(
+				'entity' => 'products',
+				'mode'   => 'rows',
+				'limit'  => Abilities::ROWS_MAX_LIMIT + 1,
+			) + $recent
+		);
+		$this->assertWPError( $too_many, 'Limit above the cap is refused by the schema.' );
+	}
+
+	/**
+	 * The rows tool's dates: at most 366 days, no more than three years back, no
+	 * later than today, and real dates.
+	 */
+	public function test_rows_date_caps() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$today = new DateTimeImmutable( 'today', wp_timezone() );
+
+		$ok = wp_get_ability( Abilities::ROWS )->execute(
+			array(
+				'entity'     => 'orders',
+				'date_start' => $today->modify( '-365 days' )->format( 'Y-m-d' ),
+				'date_end'   => $today->format( 'Y-m-d' ),
+			)
+		);
+		$this->assertIsArray( $ok, '366 days ending today is allowed: ' . ( is_wp_error( $ok ) ? $ok->get_error_message() : '' ) );
+
+		$refused = array(
+			'367 days'          => array( $today->modify( '-366 days' ), $today ),
+			'ends tomorrow'     => array( $today->modify( '-5 days' ), $today->modify( '+1 day' ) ),
+			'over 3 years back' => array( $today->modify( '-3 years -1 day' ), $today->modify( '-3 years +10 days' ) ),
+			'start after end'   => array( $today, $today->modify( '-1 day' ) ),
+		);
+		foreach ( $refused as $label => $range ) {
+			$result = wp_get_ability( Abilities::ROWS )->execute(
+				array(
+					'entity'     => 'orders',
+					'date_start' => $range[0]->format( 'Y-m-d' ),
+					'date_end'   => $range[1]->format( 'Y-m-d' ),
+				)
+			);
+			$this->assertWPError( $result, $label );
+			$this->assertSame( 'briefing_rows_date_range', $result->get_error_code(), $label );
+		}
+
+		$this->assertWPError( Abilities::check_rows_dates( '2026-02-30', '2026-03-02' ), 'Not a real date.' );
+		$this->assertWPError(
+			wp_get_ability( Abilities::ROWS )->execute( array( 'entity' => 'orders' ) ),
+			'Dates are required.'
+		);
+	}
+
+	/**
+	 * Filters that can point at one customer are refused.
+	 */
+	public function test_rows_refuses_identifying_filters() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		foreach ( array(
+			'customers' => array( 'customer_id', 'postcode', 'city' ),
+			'orders'    => array( 'billing_postcode', 'billing_city' ),
+		) as $entity => $fields ) {
+			foreach ( $fields as $field ) {
+				$result = wp_get_ability( Abilities::ROWS )->execute(
+					array(
+						'entity'  => $entity,
+						'filters' => array(
+							array(
+								'field'    => $field,
+								'operator' => 'is',
+								'value'    => 'X',
+							),
+						),
+					) + $this->recent_range( 7 )
+				);
+				$this->assertWPError( $result, "{$entity}.{$field}" );
+				$this->assertSame( 'briefing_rows_identifying_filter', $result->get_error_code() );
+			}
+		}
+	}
+
+	/**
+	 * A filter matching fewer than three orders or customers gives the count
+	 * alone; three or more give the sums.
+	 */
+	public function test_rows_withholds_sums_for_small_groups() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$germany = array(
+			'entity'  => 'orders',
+			'filters' => array(
+				array(
+					'field'    => 'billing_country',
+					'operator' => 'is',
+					'value'    => 'DE',
+				),
+			),
+		) + $this->recent_range( 7 );
+
+		for ( $i = 0; $i < 2; $i++ ) {
+			$this->seed_paid_order(
+				array(
+					'customer_id'     => $this->seed_customer(),
+					'total'           => 150 + $i,
+					'date'            => $this->days_ago( 1 ) . ' 10:00:00',
+					'billing_country' => 'DE',
+				)
+			);
+		}
+		$small = wp_get_ability( Abilities::ROWS )->execute( $germany );
+		$this->assertIsArray( $small, is_wp_error( $small ) ? $small->get_error_message() : '' );
+		$this->assertSame( array( 'matched_count' => 2 ), $small['summary'] );
+		$this->assertArrayNotHasKey( 'share_of_revenue_percent', $small['share_of_universe'] );
+		$this->assertNull( $small['pipeline'] );
+		$this->assertNull( $small['admin_equivalent'] );
+		$this->assertStringNotContainsString( '150', wp_json_encode( $small['summary'] ) );
+
+		$this->seed_paid_order(
+			array(
+				'customer_id'     => $this->seed_customer(),
+				'total'           => 152,
+				'date'            => $this->days_ago( 1 ) . ' 11:00:00',
+				'billing_country' => 'DE',
+			)
+		);
+		$this->flush_analytics_cache();
+		$enough = wp_get_ability( Abilities::ROWS )->execute( $germany );
+		$this->assertSame( 3, $enough['summary']['matched_count'] );
+		$this->assertEqualsWithDelta( 453.0, $enough['summary']['net_revenue'], 0.01 );
+	}
+
+	/**
+	 * No tool output, for any subject, carries a person key, an email address or
+	 * a pseudonymised customer label.
+	 */
+	public function test_no_person_keys_in_any_output() {
+		$product = $this->seed_simple_product(
+			array(
+				'name'  => 'Privacy mug',
+				'price' => 15,
+			)
+		);
+		foreach ( array( 'GB', 'GB', 'DE', 'FR' ) as $i => $country ) {
+			$this->seed_paid_order(
+				array(
+					'customer_id'      => $this->seed_customer( "shopper{$i}@example.test" ),
+					'total'            => 0,
+					'date'             => $this->days_ago( $i + 1 ) . ' 12:00:00',
+					'billing_country'  => $country,
+					'billing_email'    => "shopper{$i}@example.test",
+					'shipping_country' => $country,
+					'items'            => array(
+						array(
+							'product_id' => $product,
+							'qty'        => 2,
+						),
+					),
+				)
+			);
+		}
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+
+		foreach ( $this->every_tool_call() as $label => $call ) {
+			$result = wp_get_ability( $call[0] )->execute( $call[1] );
+			$this->assertNotWPError( $result, $label . ': ' . ( is_wp_error( $result ) ? $result->get_error_message() : '' ) );
+			$this->assert_no_people( $result, $label );
+		}
 	}
 
 	/**
@@ -407,6 +672,126 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 			array( 'someone-else/plugin.php', plugin_basename( BRIEFING_FOR_WOOCOMMERCE_PLUGIN_FILE ) ),
 			get_site_option( 'auto_update_plugins' )
 		);
+	}
+
+	/**
+	 * Every tool with every subject (and a dimension each), over the last week.
+	 *
+	 * @return array<string, array{0: string, 1: array}>
+	 */
+	private function every_tool_call() {
+		$week  = $this->recent_range( 7 );
+		$calls = array();
+		foreach ( array( 'revenue', 'orders', 'customers', 'customer_value', 'tax', 'refunds' ) as $subject ) {
+			$calls[ "totals {$subject}" ] = array( Abilities::TOTALS, array( 'subject' => $subject ) + $week );
+		}
+		foreach ( array(
+			'revenue'     => array( 'category', 'country', 'payment_method', 'shipping_method' ),
+			'attribution' => array( 'channel' ),
+			'products'    => array( 'product', 'variation' ),
+			'refunds'     => array( 'product', 'country' ),
+			'tax'         => array( 'rate' ),
+			'coupons'     => array( 'code' ),
+		) as $subject => $dimensions ) {
+			foreach ( $dimensions as $dimension ) {
+				$calls[ "breakdown {$subject} by {$dimension}" ] = array(
+					Abilities::BREAKDOWN,
+					array(
+						'subject'   => $subject,
+						'dimension' => $dimension,
+					) + $week,
+				);
+			}
+		}
+		foreach ( array( 'customers', 'products' ) as $subject ) {
+			$calls[ "series {$subject}" ] = array(
+				Abilities::SERIES,
+				array(
+					'subject'  => $subject,
+					'interval' => 'day',
+				) + $week,
+			);
+		}
+		foreach ( array( 'orders', 'customers', 'products' ) as $entity ) {
+			$calls[ "rows {$entity}" ] = array( Abilities::ROWS, array( 'entity' => $entity ) + $week );
+		}
+		$calls['rows products listed'] = array(
+			Abilities::ROWS,
+			array(
+				'entity' => 'products',
+				'mode'   => 'rows',
+			) + $week,
+		);
+		$calls['stock at risk']        = array( Abilities::STOCK_AT_RISK, array( 'kind' => 'low' ) + $week );
+		$calls['store profile']        = array( Abilities::STORE_PROFILE, array() );
+		return $calls;
+	}
+
+	/**
+	 * Assert a tool result has no person key at any depth, no email address and
+	 * no pseudonymised customer label.
+	 *
+	 * @param mixed  $value Tool result.
+	 * @param string $label What was called.
+	 */
+	private function assert_no_people( $value, $label ) {
+		$json = wp_json_encode( $value );
+		$this->assertDoesNotMatchRegularExpression( '/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/', $json, "{$label}: email address" );
+		$this->assertStringNotContainsString( 'Customer #', $json, "{$label}: customer label" );
+		$this->assertSame( array(), $this->person_keys_in( $value ), "{$label}: person keys" );
+	}
+
+	/**
+	 * Person keys found in a value, at any depth.
+	 *
+	 * @param mixed $value Value.
+	 * @return array<int, string>
+	 */
+	private function person_keys_in( $value ) {
+		$found = array();
+		if ( ! is_array( $value ) ) {
+			return $found;
+		}
+		foreach ( $value as $key => $item ) {
+			if ( is_string( $key ) && in_array( $key, Abilities::PERSON_KEYS, true ) ) {
+				$found[] = $key;
+			}
+			$found = array_merge( $found, $this->person_keys_in( $item ) );
+		}
+		return $found;
+	}
+
+	/**
+	 * A date some days before today, in the store's time zone.
+	 *
+	 * @param int $days Days ago.
+	 * @return string YYYY-MM-DD.
+	 */
+	private function days_ago( $days ) {
+		return ( new DateTimeImmutable( 'today', wp_timezone() ) )->modify( "-{$days} days" )->format( 'Y-m-d' );
+	}
+
+	/**
+	 * The last $days days, ending today.
+	 *
+	 * @param int $days Days in the range.
+	 * @return array{date_start: string, date_end: string}
+	 */
+	private function recent_range( $days ) {
+		return array(
+			'date_start' => $this->days_ago( $days - 1 ),
+			'date_end'   => $this->days_ago( 0 ),
+		);
+	}
+
+	/**
+	 * Clear cached analytics responses so a re-read sees new fixtures.
+	 */
+	private function flush_analytics_cache() {
+		global $wpdb;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery -- test cache reset.
+		$wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE '\\_transient\\_woocommerce\\_claude\\_%' OR option_name LIKE '\\_transient\\_timeout\\_woocommerce\\_claude\\_%'" );
+		wp_cache_flush();
 	}
 
 	/**

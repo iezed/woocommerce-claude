@@ -21,9 +21,9 @@ defined( 'ABSPATH' ) || exit;
  * narrower inputs, and take out anything about an individual person on the way
  * back (the totals tool's pseudonymised top customers, for one). The rows tool
  * wraps the shared rows tool but only lists products: orders and customers come
- * back as counts and sums, and a filter that matches fewer than MIN_GROUP of
- * them returns the count alone. Store profile returns only the six facts the
- * briefing uses.
+ * back as counts and sums, and a filter that matches (or leaves out) fewer
+ * than MIN_GROUP of them returns the count alone. Store profile returns only
+ * the six facts the briefing uses.
  */
 class Abilities {
 
@@ -56,8 +56,9 @@ class Abilities {
 
 	/**
 	 * Fewest orders or customers a rows-tool aggregate reports sums for. A
-	 * filter matching fewer returns the count alone, so a narrow filter can't
-	 * read back one customer's spend or one order's total.
+	 * filter matching fewer, or leaving fewer out of a total the same response
+	 * carries, returns the count alone, so one response can't be subtracted
+	 * down to one customer's spend or one order's total.
 	 */
 	const MIN_GROUP = 3;
 
@@ -66,6 +67,16 @@ class Abilities {
 	 * than a group.
 	 */
 	const IDENTIFYING_FIELDS = array( 'customer_id', 'city', 'postcode', 'billing_city', 'billing_postcode' );
+
+	/**
+	 * Rows-tool filter fields allowed for orders and customers. An allowlist, so
+	 * a field added to the shared registry stays refused here until it's been
+	 * looked at. Products aren't people, so their filters aren't narrowed.
+	 */
+	const ROWS_FILTER_FIELDS = array(
+		'orders'    => array( 'order_total', 'gross_total', 'num_items_sold', 'tax_total', 'shipping_total', 'discount_amount', 'status', 'date_created', 'returning_customer', 'currency', 'payment_method', 'billing_country', 'billing_state', 'shipping_country', 'shipping_state', 'attribution_channel', 'attribution_source', 'attribution_campaign', 'attribution_device', 'coupon_code', 'product_id' ),
+		'customers' => array( 'country', 'state', 'date_registered', 'date_last_active', 'lifetime_orders_count', 'lifetime_spend', 'first_order_date', 'last_order_date' ),
+	);
 
 	/**
 	 * Keys removed from every analytics response, at any depth: per-person
@@ -228,7 +239,7 @@ class Abilities {
 		self::add(
 			self::ROWS,
 			__( 'Rows', 'briefing-for-woocommerce' ),
-			__( 'Filtered questions the other tools can\'t shape, such as "orders over £100 from Germany with a coupon" or "products over £50 that sold fewer than 3". Orders and customers come back as counts and sums only (mode "aggregate"): never a list, and only the count when fewer than 3 match. Products can also be listed (mode "rows", at most 25). Filters can\'t use customer IDs, cities or postcodes. Dates: at most 366 days, starting no more than 3 years ago and ending no later than today.', 'briefing-for-woocommerce' ),
+			__( 'Filtered questions the other tools can\'t shape, such as "orders over £100 from Germany with a coupon" or "products over £50 that sold fewer than 3". Orders and customers come back as counts and sums only (mode "aggregate"): never a list, and only the count when fewer than 3 match or all but 1 or 2 match. Products can also be listed (mode "rows", at most 25). Filters can\'t use customer IDs, cities or postcodes: orders filter on totals, items, tax, shipping, discount, status, date_created, returning_customer, currency, payment_method, billing or shipping country and state, attribution, coupon_code and product_id; customers on country, state, lifetime orders and spend, and their registration, last-active and first and last order dates. Dates: at most 366 days, starting no more than 3 years ago and ending no later than today.', 'briefing-for-woocommerce' ),
 			array(
 				'type'       => 'object',
 				'required'   => array( 'entity', 'date_start', 'date_end' ),
@@ -475,6 +486,19 @@ class Abilities {
 					array( 'status' => 400 )
 				);
 			}
+			if ( isset( self::ROWS_FILTER_FIELDS[ $entity ] ) && ! in_array( $field, self::ROWS_FILTER_FIELDS[ $entity ], true ) ) {
+				return new \WP_Error(
+					'briefing_rows_filter_not_allowed',
+					sprintf(
+						/* translators: 1: filter field name, 2: orders or customers, 3: allowed field names. */
+						__( 'Briefing for WooCommerce can\'t filter %2$s on "%1$s". Fields it can filter on: %3$s.', 'briefing-for-woocommerce' ),
+						$field,
+						$entity,
+						implode( ', ', self::ROWS_FILTER_FIELDS[ $entity ] )
+					),
+					array( 'status' => 400 )
+				);
+			}
 		}
 
 		$result = AnalyticsRowsAbility::execute(
@@ -557,16 +581,24 @@ class Abilities {
 	}
 
 	/**
-	 * Withhold sums for an orders or customers aggregate that matched fewer
-	 * than MIN_GROUP: keep the counts, drop the money and anything a sum could
-	 * be worked back from.
+	 * Withhold sums for an orders or customers aggregate when they would describe
+	 * fewer than MIN_GROUP orders or customers, directly or by subtracting one
+	 * block of the response from another: keep the counts, drop the money.
+	 *
+	 * The summary goes when the filter matches fewer than MIN_GROUP, or leaves
+	 * fewer than MIN_GROUP out of the universe (whose totals stay, since they're
+	 * the store's own totals). Pipeline (on-hold) goes down to its count when
+	 * it's that small, and admin_equivalent (paid, on-hold and refunded) when
+	 * what it adds to the summary, with or without the pipeline, is.
 	 *
 	 * @param array $result Rows-tool aggregate response.
 	 * @return array
 	 */
 	public static function without_small_groups( array $result ) {
-		$matched = (int) ( $result['summary']['matched_count'] ?? 0 );
-		if ( $matched > 0 && $matched < self::MIN_GROUP ) {
+		$matched  = (int) ( $result['summary']['matched_count'] ?? 0 );
+		$universe = (int) ( $result['universe']['orders_count_in_period'] ?? $result['universe']['active_customers_in_period'] ?? 0 );
+
+		if ( self::is_small_group( $matched ) || self::is_small_group( $universe - $matched ) ) {
 			$result['summary']           = array( 'matched_count' => $matched );
 			$result['share_of_universe'] = array_intersect_key(
 				(array) ( $result['share_of_universe'] ?? array() ),
@@ -575,19 +607,35 @@ class Abilities {
 			$result['pipeline']          = null;
 			$result['admin_equivalent']  = null;
 			$result['note']              = sprintf(
-				'Only %d matched, so only the count is given: sums and averages for fewer than %d would describe individual customers or orders.',
+				'%d matched out of %d, so only the count is given: sums for this group, or for the %d left out, would describe fewer than %d customers or orders.',
 				$matched,
+				$universe,
+				max( 0, $universe - $matched ),
 				self::MIN_GROUP
 			);
 			return $result;
 		}
-		foreach ( array( 'pipeline', 'admin_equivalent' ) as $key ) {
-			$count = (int) ( $result[ $key ]['matched_count'] ?? 0 );
-			if ( $count > 0 && $count < self::MIN_GROUP ) {
-				$result[ $key ] = array( 'matched_count' => $count );
-			}
+
+		$pipeline = is_array( $result['pipeline'] ?? null ) ? (int) ( $result['pipeline']['matched_count'] ?? 0 ) : 0;
+		$admin    = is_array( $result['admin_equivalent'] ?? null ) ? (int) ( $result['admin_equivalent']['matched_count'] ?? 0 ) : 0;
+		$added    = $admin - $matched;
+		if ( self::is_small_group( $pipeline ) ) {
+			$result['pipeline'] = array( 'matched_count' => $pipeline );
+		}
+		if ( $admin && ( self::is_small_group( $added ) || self::is_small_group( $added - $pipeline ) ) ) {
+			$result['admin_equivalent'] = array( 'matched_count' => $admin );
 		}
 		return $result;
+	}
+
+	/**
+	 * Whether a count is a group too small to report sums for (zero isn't).
+	 *
+	 * @param int $count Count.
+	 * @return bool
+	 */
+	private static function is_small_group( $count ) {
+		return $count > 0 && $count < self::MIN_GROUP;
 	}
 
 	/**

@@ -328,7 +328,7 @@ WHAT THIS CAN'T ANSWER (customers subject):
 - Cities or postcodes. Country only here; revenue by state / region is subject=revenue, dimension=state.
 
 ================================================================================
-SUBJECT = cohorts  → customers whose FIRST paid order was placed in the period, grouped by what that first order looked like: dimension=channel (its attribution channel), coupon (its first coupon, or "(No coupon)"), or product (the products on it). Per cohort: customers_count, repeat_rate_percent (share who have ordered again since, up to today), avg_lifetime_spend and avg_lifetime_orders.
+SUBJECT = cohorts  → customers whose FIRST paid order was placed in the period, grouped by what that first order looked like: dimension=channel (its attribution channel), coupon (its coupon — the oldest, if it had several — or "(No coupon)"), or product (the products on it). Per cohort: customers_count, repeat_rate_percent (share who have ordered again since, up to today), avg_lifetime_spend and avg_lifetime_orders.
 ================================================================================
 
 READ IT RIGHT:

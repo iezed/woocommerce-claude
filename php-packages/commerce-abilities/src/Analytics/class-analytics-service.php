@@ -7053,10 +7053,10 @@ class AnalyticsService {
 		);
 		$paid    = $wpdb->get_results(
 			$wpdb->prepare(
-				"SELECT returning_customer, SUM(net_total) AS gross_revenue
+				"SELECT COALESCE(returning_customer, 0) AS returning_customer, SUM(net_total) AS gross_revenue
 				FROM {$os_table}
 				WHERE parent_id = 0 AND status IN ({$paid_ph}) AND {$report_range}
-				GROUP BY returning_customer",
+				GROUP BY 1",
 				$paid_statuses
 			),
 			ARRAY_A

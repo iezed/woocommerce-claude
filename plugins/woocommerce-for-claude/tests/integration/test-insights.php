@@ -145,6 +145,29 @@ class Test_Insights extends WP_UnitTestCase {
 	}
 
 	/**
+	 * Orders with no returning-customer flag count as new on both sides of the
+	 * refund rate, rather than replacing the new customers' revenue.
+	 */
+	public function test_refunds_by_customer_type_counts_unflagged_orders_as_new() {
+		global $wpdb;
+		$product   = $this->seed_simple_product(
+			array(
+				'name'  => 'Unflagged kettle',
+				'price' => 40,
+			)
+		);
+		$refunded  = $this->order( $this->seed_customer(), 0, '2026-03-03 10:00:00', array(), array( $product ) );
+		$unflagged = $this->order( $this->seed_customer(), 0, '2026-03-04 10:00:00', array(), array( $product ) );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery -- fixture: an order stats row with no flag, as older stores have.
+		$wpdb->update( $wpdb->prefix . 'wc_order_stats', array( 'returning_customer' => null ), array( 'order_id' => $unflagged->get_id() ) );
+		$this->seed_refund( $refunded, array( $product => 1 ), array( 'date' => '2026-03-05 10:00:00' ) );
+
+		$rows = $this->by_key( $this->breakdown( 'refunds', 'customer_type' )['top_groups'] );
+		$this->assertEqualsWithDelta( 80.0, $rows['new']['gross_revenue'], 0.01, 'Both orders are new-customer revenue.' );
+		$this->assertEqualsWithDelta( 50.0, $rows['new']['refund_rate_percent'], 0.01 );
+	}
+
+	/**
 	 * Cohorts by first-order channel, coupon and product: only customers whose
 	 * first paid order was placed in the period, with repeat rate and lifetime
 	 * spend.
@@ -192,6 +215,38 @@ class Test_Insights extends WP_UnitTestCase {
 		$this->assertSame( 1, $by_name['Cohort mug']['customers_count'] );
 		$this->assertSame( 1, $by_name['Cohort tee']['customers_count'] );
 		$this->assert_no_people( $product );
+	}
+
+	/**
+	 * A product cohort averages over customers: a first order with the product
+	 * on two lines counts its customer once.
+	 */
+	public function test_product_cohort_averages_count_each_customer_once() {
+		$product = $this->seed_simple_product(
+			array(
+				'name'  => 'Twice-listed mug',
+				'price' => 50,
+			)
+		);
+		$this->order( $this->seed_customer(), 0, '2026-03-03 10:00:00', array(), array( $product, $product ) );
+		$this->seed_paid_order(
+			array(
+				'customer_id' => $this->seed_customer(),
+				'total'       => 0,
+				'date'        => '2026-03-04 10:00:00',
+				'items'       => array(
+					array(
+						'product_id' => $product,
+						'qty'        => 4,
+					),
+				),
+			)
+		);
+
+		$row = $this->breakdown( 'cohorts', 'product' )['top_groups'][0];
+		$this->assertSame( 2, $row['customers_count'] );
+		$this->assertEqualsWithDelta( 150.0, $row['avg_lifetime_spend'], 0.01, '(100 + 200) / 2, not weighted by line.' );
+		$this->assertEqualsWithDelta( 1.0, $row['avg_lifetime_orders'], 0.01 );
 	}
 
 	/**

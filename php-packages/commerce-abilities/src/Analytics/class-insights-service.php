@@ -273,7 +273,7 @@ class InsightsService {
 
 	/**
 	 * Acquisition cohorts by what the first order looked like: its channel,
-	 * its first coupon, or its products.
+	 * its coupon (the oldest, if it had several), or its products.
 	 *
 	 * @param string      $period     Period shortcut.
 	 * @param string|null $date_start Custom start.
@@ -302,14 +302,17 @@ class InsightsService {
 				);
 				$rows   = $wpdb->get_results(
 					$wpdb->prepare(
-						"SELECT {$group['expr']} AS group_key,
-							COUNT(DISTINCT c.customer_id) AS customers,
-							COUNT(DISTINCT CASE WHEN c.orders > 1 THEN c.customer_id END) AS repeat_customers,
-							SUM(c.spend) / COUNT(*) AS avg_spend,
-							SUM(c.orders) / COUNT(*) AS avg_orders
-						FROM ({$cohort}) c
-						{$group['join']}
-						GROUP BY group_key
+						"SELECT g.group_key,
+							COUNT(*) AS customers,
+							SUM(g.orders > 1) AS repeat_customers,
+							AVG(g.spend) AS avg_spend,
+							AVG(g.orders) AS avg_orders
+						FROM (
+							SELECT DISTINCT {$group['expr']} AS group_key, c.customer_id, c.spend, c.orders
+							FROM ({$cohort}) c
+							{$group['join']}
+						) g
+						GROUP BY g.group_key
 						ORDER BY customers DESC, avg_spend DESC
 						LIMIT %d",
 						$limit
@@ -337,7 +340,7 @@ class InsightsService {
 
 				$definitions = array(
 					'channel' => 'the channel their first order came through (order attribution)',
-					'coupon'  => 'the first coupon on their first order, or none',
+					'coupon'  => 'the coupon on their first order (the oldest coupon, if it had several), or none',
 					'product' => 'the products on their first order (a customer whose first order had three products counts in all three, so cohorts overlap)',
 				);
 
@@ -716,7 +719,7 @@ class InsightsService {
 			return (array) $wpdb->get_results(
 				$wpdb->prepare(
 					"SELECT TIMESTAMPDIFF(MINUTE, os.date_paid, os.date_completed) AS minutes,
-						(SELECT MIN(oi.order_item_name) FROM {$items} oi WHERE oi.order_id = os.order_id AND oi.order_item_type = 'shipping') AS method
+						(SELECT oi.order_item_name FROM {$items} oi WHERE oi.order_id = os.order_id AND oi.order_item_type = 'shipping' ORDER BY oi.order_item_id LIMIT 1) AS method
 					FROM {$os} os
 					WHERE os.parent_id = 0 AND os.status = 'wc-completed'
 						AND os.date_paid >= %s AND os.date_paid <= %s

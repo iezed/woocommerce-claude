@@ -12,6 +12,7 @@
 
 use WooCommerce\Briefing\Abilities;
 use WooCommerce\Briefing\Plugin;
+use WooCommerce\CommerceAbilities\Analytics\AnalyticsService;
 
 /**
  * Tests for plugins/briefing-for-woocommerce.
@@ -424,6 +425,129 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 		$enough = wp_get_ability( Abilities::ROWS )->execute( $germany );
 		$this->assertSame( 3, $enough['summary']['matched_count'] );
 		$this->assertEqualsWithDelta( 453.0, $enough['summary']['net_revenue'], 0.01 );
+	}
+
+	/**
+	 * A filter that leaves fewer than three orders out of the period gives the
+	 * count alone too: its sums, taken from the universe the same response
+	 * carries, would give the orders left out.
+	 */
+	public function test_rows_withholds_sums_when_few_are_left_out() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$germany = array(
+			'entity'  => 'orders',
+			'filters' => array(
+				array(
+					'field'    => 'billing_country',
+					'operator' => 'is',
+					'value'    => 'DE',
+				),
+			),
+		) + $this->recent_range( 7 );
+
+		foreach ( array( 'DE', 'DE', 'DE', 'FR' ) as $i => $country ) {
+			$this->seed_paid_order(
+				array(
+					'customer_id'     => $this->seed_customer(),
+					'total'           => 100 + $i,
+					'date'            => $this->days_ago( 1 ) . ' 10:00:00',
+					'billing_country' => $country,
+				)
+			);
+		}
+		$one_left_out = wp_get_ability( Abilities::ROWS )->execute( $germany );
+		$this->assertIsArray( $one_left_out, is_wp_error( $one_left_out ) ? $one_left_out->get_error_message() : '' );
+		$this->assertSame( array( 'matched_count' => 3 ), $one_left_out['summary'] );
+		$this->assertArrayNotHasKey( 'share_of_revenue_percent', $one_left_out['share_of_universe'] );
+
+		foreach ( array( 1, 2 ) as $i ) {
+			$this->seed_paid_order(
+				array(
+					'customer_id'     => $this->seed_customer(),
+					'total'           => 110 + $i,
+					'date'            => $this->days_ago( 1 ) . ' 11:00:00',
+					'billing_country' => 'FR',
+				)
+			);
+		}
+		$this->flush_analytics_cache();
+		$three_left_out = wp_get_ability( Abilities::ROWS )->execute( $germany );
+		$this->assertEqualsWithDelta( 303.0, $three_left_out['summary']['net_revenue'], 0.01 );
+	}
+
+	/**
+	 * The pipeline and dashboard-matching blocks drop to counts when they, or
+	 * what they add to the summary, are one or two orders.
+	 */
+	public function test_rows_withholds_sibling_sums_that_subtract_to_one_order() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$germany = array(
+			'entity'  => 'orders',
+			'filters' => array(
+				array(
+					'field'    => 'billing_country',
+					'operator' => 'is',
+					'value'    => 'DE',
+				),
+			),
+		) + $this->recent_range( 7 );
+
+		foreach ( array( 'completed', 'completed', 'completed', 'refunded', 'on-hold' ) as $i => $status ) {
+			$this->seed_paid_order(
+				array(
+					'customer_id'     => $this->seed_customer(),
+					'total'           => 200 + $i,
+					'status'          => $status,
+					'date'            => $this->days_ago( 1 ) . ' 10:00:00',
+					'billing_country' => 'DE',
+				)
+			);
+		}
+		$result = wp_get_ability( Abilities::ROWS )->execute( $germany );
+		$this->assertIsArray( $result, is_wp_error( $result ) ? $result->get_error_message() : '' );
+		$this->assertSame( 3, $result['summary']['matched_count'] );
+		$this->assertArrayHasKey( 'net_revenue', $result['summary'], 'Three paid orders, none left out: sums stay.' );
+		$this->assertSame( array( 'matched_count' => 1 ), $result['pipeline'], 'One on-hold order: count only.' );
+		$this->assertSame( array( 'matched_count' ), array_keys( $result['admin_equivalent'] ), 'Less the summary, it is one refunded order: count only.' );
+		$this->assertStringNotContainsString( '203', wp_json_encode( $result ) );
+		$this->assertStringNotContainsString( '204', wp_json_encode( $result ) );
+	}
+
+	/**
+	 * Orders and customers filter only on Briefing's allowlist, and every field
+	 * in the shared registries is either allowed or refused as identifying, so
+	 * a field added there fails this test until it's been looked at.
+	 */
+	public function test_rows_filters_are_an_allowlist() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$result = wp_get_ability( Abilities::ROWS )->execute(
+			array(
+				'entity'  => 'orders',
+				'filters' => array(
+					array(
+						'field'    => 'billing_email',
+						'operator' => 'is',
+						'value'    => 'someone@example.com',
+					),
+				),
+			) + $this->recent_range( 7 )
+		);
+		$this->assertWPError( $result );
+		$this->assertSame( 'briefing_rows_filter_not_allowed', $result->get_error_code() );
+
+		foreach ( array(
+			'orders'    => 'qa_orders_field_registry',
+			'customers' => 'qa_customers_field_registry',
+		) as $entity => $method ) {
+			$registry = new ReflectionMethod( AnalyticsService::class, $method );
+			$registry->setAccessible( true );
+			foreach ( array_keys( $registry->invoke( null ) ) as $field ) {
+				$this->assertTrue(
+					in_array( $field, Abilities::ROWS_FILTER_FIELDS[ $entity ], true ) || in_array( $field, Abilities::IDENTIFYING_FIELDS, true ),
+					"{$entity}.{$field} is in the shared registry but neither allowed nor refused by Briefing."
+				);
+			}
+		}
 	}
 
 	/**

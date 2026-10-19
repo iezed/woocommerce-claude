@@ -10,14 +10,14 @@ Six tools, and nothing else:
 
 | Tool | What it answers |
 |---|---|
-| `briefing/totals` | Revenue, orders (with statuses), customers (new and returning), customer value, tax, refunds — for a period against the one before |
-| `briefing/breakdown` | One subject by one dimension: sales by category, country, payment or shipping method; attribution by channel, source, campaign or device; products by product or variation; refunds; tax by rate; coupons |
+| `briefing/totals` | Revenue, orders (with statuses), customers (new and returning), customer value, tax, refunds, customer concentration (share of revenue from the top 10 customers and the top fifth), fulfilment time (payment to completion: median, p90, buckets) and margin (from cost of goods, with how much of revenue has costs) — for a period against the one before |
+| `briefing/breakdown` | One subject by one dimension: revenue by category, country, state, shipping country, payment or shipping method; attribution by channel, source, campaign or device; products by product or variation; refunds by product, country, or new and returning customers; tax by rate; coupons; customers by country (new and returning); first-time customer cohorts by first channel, coupon or product (repeat rate, average lifetime spend); products bought together; fulfilment time by shipping method |
 | `briefing/series` | Customers or top products by day, week or month |
 | `briefing/store-profile` | Store name, currency, time zone, country, and whether order tables (HPOS) are on |
 | `briefing/stock-at-risk` | Products that sold in the period and are now out of stock, on backorder, or nearly out |
 | `briefing/rows` | Filtered questions ("orders over £100 from Germany with a coupon"): counts and sums for orders and customers, or a short list of products (at most 25). At most 366 days, starting no more than three years ago and ending no later than today |
 
-**Totals, never people.** The analytics tools wrap the shared `wc-analytics/*` implementations in `php-packages/commerce-abilities`, with narrower inputs, and remove anything about an individual on the way out (such as the pseudonymised top-customer list in customer value). The rows tool lists products only: for orders and customers it returns counts and sums, never a list, and when a filter matches fewer than three (or leaves fewer than three out) it returns the count alone, with no sums. It also refuses filters on customer IDs, cities and postcodes, and filters orders and customers only on the fields it lists. No order, customer, name or email leaves the store.
+**Totals, never people.** The analytics tools wrap the shared `wc-analytics/*` implementations in `php-packages/commerce-abilities`, with narrower inputs, and remove anything about an individual on the way out (such as the pseudonymised top-customer list in customer value). Where a total needs to tell customers apart — concentration, cohorts — that happens inside the database query (guests by billing email) and only the totals come out, with spend and repeat figures left out for any group of fewer than three customers. The rows tool lists products only: for orders and customers it returns counts and sums, never a list, and when a filter matches fewer than three (or leaves fewer than three out) it returns the count alone, with no sums. It also refuses filters on customer IDs, cities and postcodes, and filters orders and customers only on the fields it lists. No order, customer, name or email leaves the store.
 
 ## How it differs from WooCommerce for Claude
 

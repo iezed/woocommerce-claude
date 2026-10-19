@@ -126,14 +126,14 @@ class Abilities {
 		self::add(
 			self::TOTALS,
 			__( 'Totals', 'briefing-for-woocommerce' ),
-			__( 'Headline totals for a period against the one before: revenue, orders (with statuses), customers (new and returning), customer value (lifetime and repeat buying, no individual customers), tax (collected, refunded and net, by rate) or refunds.', 'briefing-for-woocommerce' ),
+			__( 'Headline totals for a period against the one before: revenue, orders (with statuses), customers (new and returning), customer value (lifetime and repeat buying, no individual customers), tax (collected, refunded and net, by rate), refunds, customer concentration (share of revenue from the top 10 customers and the top fifth, by spend in the period), fulfilment (hours from payment to completion: median, p90, buckets) or margin (from cost of goods, with how much of revenue has costs entered). Concentration and cohort figures that would describe fewer than 3 customers come back as null. Can\'t answer: who a customer is, or anything about one order or one customer; those stay in the store\'s admin.', 'briefing-for-woocommerce' ),
 			array(
 				'type'       => 'object',
 				'required'   => array( 'subject', 'date_start', 'date_end' ),
 				'properties' => array(
 					'subject' => array(
 						'type' => 'string',
-						'enum' => array( 'revenue', 'orders', 'customers', 'customer_value', 'tax', 'refunds' ),
+						'enum' => array( 'revenue', 'orders', 'customers', 'customer_value', 'tax', 'refunds', 'customer_concentration', 'fulfilment', 'margin' ),
 					),
 				) + $dates,
 			),
@@ -143,18 +143,18 @@ class Abilities {
 		self::add(
 			self::BREAKDOWN,
 			__( 'Breakdown', 'briefing-for-woocommerce' ),
-			__( 'One subject broken down by one dimension for a period against the one before: sales by category, country, payment or shipping method; attribution by channel, source, campaign or device; products by product or variation; refunds by product or country; tax by rate; coupons by code.', 'briefing-for-woocommerce' ),
+			__( 'One subject broken down by one dimension for a period: revenue by category, country, state (billing state or region), shipping_country, payment or shipping method; attribution by channel, source, campaign or device; products by product or variation; refunds by product, country or customer_type (new or returning); tax by rate; coupons by code; customers by country (new and returning); cohorts of first-time customers by the channel, coupon or product of their first order (repeat rate, average lifetime spend); product_pairs by pair (products bought together); fulfilment by shipping_method. Concentration and cohort figures that would describe fewer than 3 customers come back as null. Can\'t answer: who the customers in a group are, or anything about one order or one customer; those stay in the store\'s admin.', 'briefing-for-woocommerce' ),
 			array(
 				'type'       => 'object',
 				'required'   => array( 'subject', 'dimension', 'date_start', 'date_end' ),
 				'properties' => array(
 					'subject'   => array(
 						'type' => 'string',
-						'enum' => array( 'revenue', 'attribution', 'products', 'refunds', 'tax', 'coupons' ),
+						'enum' => array( 'revenue', 'attribution', 'products', 'refunds', 'tax', 'coupons', 'customers', 'cohorts', 'product_pairs', 'fulfilment' ),
 					),
 					'dimension' => array(
 						'type' => 'string',
-						'enum' => array( 'category', 'country', 'payment_method', 'shipping_method', 'channel', 'source', 'medium', 'campaign', 'device', 'channel_source', 'product', 'variation', 'rate', 'code' ),
+						'enum' => array( 'category', 'country', 'state', 'shipping_country', 'payment_method', 'shipping_method', 'channel', 'source', 'medium', 'campaign', 'device', 'channel_source', 'product', 'variation', 'rate', 'code', 'customer_type', 'coupon', 'pair' ),
 					),
 					'limit'     => array(
 						'type'    => 'integer',
@@ -341,7 +341,11 @@ class Abilities {
 	 * @return array|\WP_Error
 	 */
 	public static function totals( $input ) {
-		return self::without_people( AnalyticsTotalsAbility::execute( self::pick( $input, array( 'subject', 'date_start', 'date_end', 'compare' ) ) ) );
+		$result = AnalyticsTotalsAbility::execute( self::pick( $input, array( 'subject', 'date_start', 'date_end', 'compare' ) ) );
+		if ( is_array( $result ) && 'customer_concentration' === ( $input['subject'] ?? '' ) ) {
+			$result = self::concentration_without_small_groups( $result );
+		}
+		return self::without_people( $result );
 	}
 
 	/**
@@ -351,7 +355,11 @@ class Abilities {
 	 * @return array|\WP_Error
 	 */
 	public static function breakdown( $input ) {
-		return self::without_people( AnalyticsBreakdownAbility::execute( self::pick( $input, array( 'subject', 'dimension', 'limit', 'date_start', 'date_end', 'compare' ) ) ) );
+		$result = AnalyticsBreakdownAbility::execute( self::pick( $input, array( 'subject', 'dimension', 'limit', 'date_start', 'date_end', 'compare' ) ) );
+		if ( is_array( $result ) && 'cohorts' === ( $input['subject'] ?? '' ) ) {
+			$result = self::cohorts_without_small_groups( $result );
+		}
+		return self::without_people( $result );
 	}
 
 	/**
@@ -626,6 +634,113 @@ class Abilities {
 			$result['admin_equivalent'] = array( 'matched_count' => $admin );
 		}
 		return $result;
+	}
+
+	/**
+	 * Customer concentration with spend figures that would describe fewer than
+	 * MIN_GROUP customers set to null: the average and median when there are
+	 * that few customers, the top-fifth figures when the top fifth is that few,
+	 * and the top-10 figures when the customers outside the top 10 are. The
+	 * period's revenue and the counts stay. Changes against the previous period
+	 * go for any figure withheld on either side.
+	 *
+	 * @param array $result Totals response for customer_concentration.
+	 * @return array
+	 */
+	public static function concentration_without_small_groups( array $result ) {
+		$withheld = array();
+		if ( is_array( $result['metrics'] ?? null ) ) {
+			$result['metrics'] = self::concentration_metrics_without_small_groups( $result['metrics'], $withheld );
+		}
+		if ( is_array( $result['comparison']['metrics'] ?? null ) ) {
+			$result['comparison']['metrics'] = self::concentration_metrics_without_small_groups( $result['comparison']['metrics'], $withheld );
+			foreach ( $withheld as $key ) {
+				if ( isset( $result['comparison']['changes'] ) && array_key_exists( $key, $result['comparison']['changes'] ) ) {
+					$result['comparison']['changes'][ $key ] = null;
+				}
+			}
+		}
+		if ( $withheld ) {
+			$result['note'] = trim( ( $result['note'] ?? '' ) . ' ' . self::small_group_note( 'customers' ) );
+		}
+		return $result;
+	}
+
+	/**
+	 * One concentration metrics block, with spend figures for fewer than
+	 * MIN_GROUP customers set to null.
+	 *
+	 * @param array $metrics  Metrics block.
+	 * @param array $withheld Keys withheld so far; added to.
+	 * @return array
+	 */
+	private static function concentration_metrics_without_small_groups( array $metrics, array &$withheld ) {
+		$count = (int) ( $metrics['customers_count'] ?? 0 );
+		$hide  = array();
+		if ( self::is_small_group( $count ) ) {
+			$hide = array( 'avg_spend_per_customer', 'median_spend_per_customer', 'top_10_revenue', 'top_10_share_percent', 'top_20_percent_revenue', 'top_20_percent_share_percent' );
+		} else {
+			if ( self::is_small_group( (int) ( $metrics['top_20_percent_customers_count'] ?? 0 ) ) ) {
+				$hide = array_merge( $hide, array( 'top_20_percent_revenue', 'top_20_percent_share_percent' ) );
+			}
+			if ( self::is_small_group( $count - (int) ( $metrics['top_10_customers_count'] ?? 0 ) ) ) {
+				$hide = array_merge( $hide, array( 'top_10_revenue', 'top_10_share_percent' ) );
+			}
+		}
+		foreach ( $hide as $key ) {
+			if ( array_key_exists( $key, $metrics ) ) {
+				$metrics[ $key ] = null;
+			}
+		}
+		$withheld = array_values( array_unique( array_merge( $withheld, $hide ) ) );
+		return $metrics;
+	}
+
+	/**
+	 * Acquisition cohorts with the repeat and lifetime figures set to null for
+	 * any cohort of fewer than MIN_GROUP customers, and for the totals when the
+	 * cohort is that small or the customers outside the listed cohorts are (the
+	 * totals less the listed cohorts would give theirs). Counts stay.
+	 *
+	 * @param array $result Breakdown response for cohorts.
+	 * @return array
+	 */
+	public static function cohorts_without_small_groups( array $result ) {
+		$keys     = array( 'repeat_customers', 'repeat_rate_percent', 'avg_lifetime_spend', 'avg_lifetime_orders' );
+		$withheld = false;
+		$listed   = 0;
+		foreach ( (array) ( $result['top_groups'] ?? array() ) as $i => $row ) {
+			$customers = (int) ( $row['customers_count'] ?? 0 );
+			if ( self::is_small_group( $customers ) ) {
+				foreach ( $keys as $key ) {
+					$result['top_groups'][ $i ][ $key ] = null;
+				}
+				$withheld = true;
+			} else {
+				$listed += $customers;
+			}
+		}
+		$size = (int) ( $result['totals']['customers_count'] ?? 0 );
+		if ( is_array( $result['totals'] ?? null ) && ( self::is_small_group( $size ) || self::is_small_group( $size - $listed ) ) ) {
+			foreach ( $keys as $key ) {
+				$result['totals'][ $key ] = null;
+			}
+			$withheld = true;
+		}
+		if ( $withheld ) {
+			$result['note'] = trim( ( $result['note'] ?? '' ) . ' ' . self::small_group_note( 'customers' ) );
+		}
+		return $result;
+	}
+
+	/**
+	 * Note added when figures are withheld for a small group.
+	 *
+	 * @param string $what customers or orders.
+	 * @return string
+	 */
+	private static function small_group_note( $what ) {
+		return sprintf( 'Figures that would describe fewer than %d %s are null: with this few, they would be about individual %s.', self::MIN_GROUP, $what, $what );
 	}
 
 	/**

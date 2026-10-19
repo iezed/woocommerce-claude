@@ -428,6 +428,155 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 	}
 
 	/**
+	 * The new totals come through the Briefing tools unchanged apart from
+	 * person keys, and a guest's email never leaves the concentration query.
+	 */
+	public function test_new_totals_match_the_shared_tools() {
+		foreach ( array( 'Big.Spender@example.test', 'big.spender@example.test' ) as $i => $email ) {
+			$order = wc_create_order();
+			$order->set_billing_email( $email );
+			$order->set_total( 500 );
+			$order->set_status( 'completed' );
+			$order->set_date_created( '2026-03-0' . ( 3 + $i ) . ' 10:00:00' );
+			$order->set_date_paid( '2026-03-0' . ( 3 + $i ) . ' 10:00:00' );
+			$order->save();
+			\Automattic\WooCommerce\Admin\API\Reports\Orders\Stats\DataStore::sync_order( $order->get_id() );
+		}
+		$this->seed_paid_order(
+			array(
+				'customer_id' => $this->seed_customer(),
+				'total'       => 100,
+				'date'        => '2026-03-05 12:00:00',
+			)
+		);
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$week = array(
+			'date_start' => '2026-03-02',
+			'date_end'   => '2026-03-08',
+		);
+
+		$shared = \WooCommerce\CommerceAbilities\Abilities\AnalyticsTotalsAbility::execute( array( 'subject' => 'customer_concentration' ) + $week );
+		$this->assertSame( 2, $shared['metrics']['customers_count'], 'The guest is one customer across both orders.' );
+		$this->assertSame( 90.9, $shared['metrics']['top_20_percent_share_percent'] );
+
+		$ours = wp_get_ability( Abilities::TOTALS )->execute( array( 'subject' => 'customer_concentration' ) + $week );
+		$this->assertIsArray( $ours, is_wp_error( $ours ) ? $ours->get_error_message() : '' );
+		$this->assertSame( 2, $ours['metrics']['customers_count'] );
+		$this->assertNull( $ours['metrics']['top_20_percent_share_percent'], 'Two customers: shares would describe each of them.' );
+		$this->assertStringNotContainsString( 'big.spender', strtolower( wp_json_encode( $ours ) ) );
+		$this->assertSame( Abilities::without_people( Abilities::concentration_without_small_groups( $shared ) ), $ours );
+
+		$cohorts = wp_get_ability( Abilities::BREAKDOWN )->execute(
+			array(
+				'subject'   => 'cohorts',
+				'dimension' => 'coupon',
+			) + $week
+		);
+		$this->assertIsArray( $cohorts, is_wp_error( $cohorts ) ? $cohorts->get_error_message() : '' );
+		$this->assertSame( 'cohorts', $cohorts['subject'] );
+	}
+
+	/**
+	 * Concentration figures that would describe fewer than three customers are
+	 * null: the spend figures with that few customers, the top fifth when it's
+	 * that few, and the top 10 when the rest are.
+	 */
+	public function test_concentration_withholds_small_groups() {
+		$metrics = function ( $count, $top_10, $top_fifth ) {
+			return array(
+				'customers_count'                => $count,
+				'revenue'                        => 1000.0,
+				'avg_spend_per_customer'         => 10.0,
+				'median_spend_per_customer'      => 10.0,
+				'top_10_customers_count'         => $top_10,
+				'top_10_revenue'                 => 900.0,
+				'top_10_share_percent'           => 90.0,
+				'top_20_percent_customers_count' => $top_fifth,
+				'top_20_percent_revenue'         => 500.0,
+				'top_20_percent_share_percent'   => 50.0,
+			);
+		};
+
+		$two = Abilities::concentration_without_small_groups( array( 'metrics' => $metrics( 2, 2, 1 ) ) );
+		$this->assertSame( 1000.0, $two['metrics']['revenue'], 'The period\'s revenue is a store total and stays.' );
+		foreach ( array( 'avg_spend_per_customer', 'median_spend_per_customer', 'top_10_revenue', 'top_20_percent_revenue', 'top_20_percent_share_percent' ) as $key ) {
+			$this->assertNull( $two['metrics'][ $key ], $key );
+		}
+		$this->assertStringContainsString( 'fewer than 3', $two['note'] );
+
+		$five = Abilities::concentration_without_small_groups( array( 'metrics' => $metrics( 5, 5, 1 ) ) );
+		$this->assertSame( 10.0, $five['metrics']['median_spend_per_customer'] );
+		$this->assertSame( 900.0, $five['metrics']['top_10_revenue'], 'With 5 customers the top 10 is everyone.' );
+		$this->assertNull( $five['metrics']['top_20_percent_revenue'], 'The top fifth of 5 is one customer.' );
+
+		$twelve = Abilities::concentration_without_small_groups(
+			array(
+				'metrics'    => $metrics( 12, 10, 3 ),
+				'comparison' => array(
+					'metrics' => $metrics( 20, 10, 4 ),
+					'changes' => array(
+						'top_10_share_percent'         => array( 'difference' => 1.0 ),
+						'top_20_percent_share_percent' => array( 'difference' => 1.0 ),
+					),
+				),
+			)
+		);
+		$this->assertNull( $twelve['metrics']['top_10_revenue'], 'Revenue less the top 10 would be the other two customers.' );
+		$this->assertSame( 500.0, $twelve['metrics']['top_20_percent_revenue'] );
+		$this->assertSame( 900.0, $twelve['comparison']['metrics']['top_10_revenue'] );
+		$this->assertNull( $twelve['comparison']['changes']['top_10_share_percent'], 'A change against a withheld figure goes too.' );
+		$this->assertSame( array( 'difference' => 1.0 ), $twelve['comparison']['changes']['top_20_percent_share_percent'] );
+
+		$this->assertArrayNotHasKey( 'note', Abilities::concentration_without_small_groups( array( 'metrics' => $metrics( 20, 10, 4 ) ) ) );
+	}
+
+	/**
+	 * Cohorts of fewer than three customers keep their count but not their
+	 * repeat or lifetime figures, and neither do the totals when the customers
+	 * outside the listed cohorts are that few.
+	 */
+	public function test_cohorts_withhold_small_groups() {
+		$cohort = function ( $key, $customers ) {
+			return array(
+				'key'                 => $key,
+				'customers_count'     => $customers,
+				'repeat_customers'    => 1,
+				'repeat_rate_percent' => 20.0,
+				'avg_lifetime_spend'  => 75.0,
+				'avg_lifetime_orders' => 1.5,
+			);
+		};
+		$result = function ( $size, array $groups ) {
+			return array(
+				'totals'     => array(
+					'customers_count'     => $size,
+					'repeat_customers'    => 2,
+					'repeat_rate_percent' => 25.0,
+					'avg_lifetime_spend'  => 80.0,
+					'avg_lifetime_orders' => 1.4,
+				),
+				'top_groups' => $groups,
+			);
+		};
+
+		$small = Abilities::cohorts_without_small_groups( $result( 6, array( $cohort( 'Direct', 5 ), $cohort( 'personal-code', 1 ) ) ) );
+		$this->assertSame( 75.0, $small['top_groups'][0]['avg_lifetime_spend'] );
+		$this->assertSame( 1, $small['top_groups'][1]['customers_count'] );
+		$this->assertNull( $small['top_groups'][1]['avg_lifetime_spend'] );
+		$this->assertNull( $small['top_groups'][1]['repeat_rate_percent'] );
+		$this->assertNull( $small['totals']['avg_lifetime_spend'], 'The totals less Direct would be the one customer.' );
+		$this->assertSame( 6, $small['totals']['customers_count'] );
+
+		$unlisted = Abilities::cohorts_without_small_groups( $result( 7, array( $cohort( 'Direct', 5 ) ) ) );
+		$this->assertNull( $unlisted['totals']['avg_lifetime_spend'], 'Two customers sit outside the listed cohorts.' );
+
+		$enough = Abilities::cohorts_without_small_groups( $result( 8, array( $cohort( 'Direct', 5 ), $cohort( 'Email', 3 ) ) ) );
+		$this->assertSame( 80.0, $enough['totals']['avg_lifetime_spend'] );
+		$this->assertSame( 75.0, $enough['top_groups'][1]['avg_lifetime_spend'] );
+		$this->assertArrayNotHasKey( 'note', $enough );
+	}
+
+	/**
 	 * A filter that leaves fewer than three orders out of the period gives the
 	 * count alone too: its sums, taken from the universe the same response
 	 * carries, would give the orders left out.
@@ -806,16 +955,20 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 	private function every_tool_call() {
 		$week  = $this->recent_range( 7 );
 		$calls = array();
-		foreach ( array( 'revenue', 'orders', 'customers', 'customer_value', 'tax', 'refunds' ) as $subject ) {
+		foreach ( array( 'revenue', 'orders', 'customers', 'customer_value', 'tax', 'refunds', 'customer_concentration', 'fulfilment', 'margin' ) as $subject ) {
 			$calls[ "totals {$subject}" ] = array( Abilities::TOTALS, array( 'subject' => $subject ) + $week );
 		}
 		foreach ( array(
-			'revenue'     => array( 'category', 'country', 'payment_method', 'shipping_method' ),
-			'attribution' => array( 'channel' ),
-			'products'    => array( 'product', 'variation' ),
-			'refunds'     => array( 'product', 'country' ),
-			'tax'         => array( 'rate' ),
-			'coupons'     => array( 'code' ),
+			'revenue'       => array( 'category', 'country', 'state', 'shipping_country', 'payment_method', 'shipping_method' ),
+			'attribution'   => array( 'channel' ),
+			'products'      => array( 'product', 'variation' ),
+			'refunds'       => array( 'product', 'country', 'customer_type' ),
+			'tax'           => array( 'rate' ),
+			'coupons'       => array( 'code' ),
+			'customers'     => array( 'country' ),
+			'cohorts'       => array( 'channel', 'coupon', 'product' ),
+			'product_pairs' => array( 'pair' ),
+			'fulfilment'    => array( 'shipping_method' ),
 		) as $subject => $dimensions ) {
 			foreach ( $dimensions as $dimension ) {
 				$calls[ "breakdown {$subject} by {$dimension}" ] = array(

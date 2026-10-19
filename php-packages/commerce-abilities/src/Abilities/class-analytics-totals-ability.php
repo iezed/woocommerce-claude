@@ -10,6 +10,7 @@
 namespace WooCommerce\CommerceAbilities\Abilities;
 
 use WooCommerce\CommerceAbilities\Analytics\AnalyticsService;
+use WooCommerce\CommerceAbilities\Analytics\InsightsService;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -31,7 +32,7 @@ class AnalyticsTotalsAbility {
 				// phpcs:disable WordPress.WP.I18n.NonSingularStringLiteralText -- Consolidated multi-subject narrative; per-subject sections follow.
 				'description'         => __(
 					<<<'DESCRIPTION'
-Headline aggregate for one of six subjects — revenue, orders, customers, customer_value, tax, refunds. Pick the subject by the question shape; the response envelope is stable, the inside changes by subject. For "broken down by X" questions use the breakdown tool; for time-series use the series tool; for "show me the actual records" use the rows tool.
+Headline aggregate for one of nine subjects — revenue, orders, customers, customer_value, tax, refunds, customer_concentration, fulfilment, margin. Pick the subject by the question shape; the response envelope is stable, the inside changes by subject. For "broken down by X" questions use the breakdown tool; for time-series use the series tool; for "show me the actual records" use the rows tool.
 
 UNIVERSAL RULES (the connector instructions carry these in full — repeated here so each subject section can reference them):
 - Never quote internal field paths in merchant-facing text. Field paths are for YOUR orientation when picking which number to read; merchants see plain-English names ("collected revenue", "pending revenue", "the dashboard-matching figure"). Same applies to formula breakdowns: explain in English ("net sales are gross sales minus refunds") rather than pasting field-name arithmetic.
@@ -308,7 +309,7 @@ When refunds_count is small (≤5 typically), the refund_rate_percent is mathema
 WHAT THIS CAN'T ANSWER (refunds subject):
 - Why the refund happened. WooCommerce stores a free-text reason note on each refund but it's unstructured (often blank, or one-word like "damaged") — trying to aggregate free text produces hallucinogenic categorisation. If the merchant asks for refund reasons, point them at WP Admin > WooCommerce > Orders with status filter "Refunded" to read individual notes.
 - Per-coupon refund rate. Coupons aren't grouped here — point the merchant at the coupon subject of wc-analytics-breakdown for per-code stats.
-- Refund rate by customer segment (new vs returning). The returning_customer flag is on the parent order but we don't split the refunds pivot by it in the MVP.
+- Refund rate by customer segment (new vs returning) isn't in this headline — use wc-analytics-breakdown subject=refunds, dimension=customer_type for that split.
 - Refunds by day of week / hour. Not yet surfaced as a dimension.
 - Separate shipping-refund / tax-refund splits. The headline uses the canonical formula (net + tax + shipping) to match revenue.
 - Refund-to-chargeback distinction. Chargebacks issued through the payment processor don't automatically create a refund sub-order — they show up on the processor side (Stripe dashboard, PayPal reports). Point the merchant at their payment processor's dashboard.
@@ -320,6 +321,51 @@ GOOD FOLLOW-UPS:
 - "How does the top refunded product's sales volume look?" → wc-analytics-breakdown subject=products
 - "Compare to the previous period?" → compare=true or recall with different dates
 - "What's the headline revenue for this period?" → wc-analytics-totals subject=revenue
+
+================================================================================
+SUBJECT = customer_concentration  → how much of the period's revenue came from the biggest spenders: share from the top 10 customers and from the top fifth of customers, by spend within the period (not lifetime), with the customer count, average and median spend per customer.
+================================================================================
+
+HOW CUSTOMERS ARE COUNTED: accounts are one customer each; guests are grouped by billing email inside the query, so a guest who orders three times counts once. No customer, email or ID is returned — only the totals.
+
+READ — DON'T DERIVE: top_10_share_percent and top_20_percent_share_percent are pre-computed. comparison.changes gives the movement in percentage points. When customers_count is 10 or fewer the top-10 share is 100% by definition; the note says so — lead with the top-fifth share instead.
+
+NARRATIVE: high concentration (top fifth bringing well over half of revenue) means a few customers carry the store — worth knowing before a price change or when one goes quiet. Don't name or guess who they are.
+
+WHAT THIS CAN'T ANSWER (customer_concentration subject):
+- Who the top customers are. Names, emails and order lists stay in WP Admin > WooCommerce > Customers, sorted by total spend.
+- Lifetime concentration. This is spend within the period; for lifetime value use subject=customer_value.
+
+GOOD FOLLOW-UPS:
+- "How many of them are repeat buyers?" → wc-analytics-totals subject=customers
+- "Where are those customers?" → wc-analytics-breakdown subject=customers, dimension=country
+
+================================================================================
+SUBJECT = fulfilment  → hours from payment to completion for orders paid in the period: median, p90, average and fixed buckets (within 1 day, 1–2, 2–3, 3–7, over 7 days), plus orders completed automatically and orders still processing. For the split by shipping method use wc-analytics-breakdown subject=fulfilment, dimension=shipping_method.
+================================================================================
+
+READ — DON'T DERIVE: median_hours, p90_hours and each bucket's share_percent are pre-computed. Use the median for "typical"; p90 is the slow tail ("one order in ten took longer than this").
+
+CAVEATS TO SAY OUT LOUD:
+- Orders completed within a minute of payment are automatic completions (usually virtual or downloadable products) and sit outside the times.
+- still_processing_orders counts orders paid in the period that aren't completed yet; for a recent period they will finish later, so the times can look faster than they end up.
+- "Completed" is a status the store sets. Most stores mark an order completed when it ships, but not all — say "marked completed", not "delivered".
+
+WHAT THIS CAN'T ANSWER (fulfilment subject):
+- Delivery times. Carrier tracking isn't in WooCommerce's order data; point the merchant at their shipping provider's dashboard.
+- Which orders were slow. Individual orders stay in WP Admin > WooCommerce > Orders, filtered by status.
+
+================================================================================
+SUBJECT = margin  → gross margin from WooCommerce's cost of goods where costs are entered: product revenue, revenue with costs, coverage_percent (how much of product revenue has costs), cost of goods, gross margin and margin_percent.
+================================================================================
+
+AVAILABILITY: when the store has the cost of goods feature turned off, available is false, metrics is null, and the note says how to turn it on. Say plainly that margin can't be worked out yet.
+
+COVERAGE FIRST: margin_percent describes only the lines with a cost. Always quote coverage_percent alongside it ("on the 64% of sales that have costs entered, margin was 41%"). Below 50% coverage the note says the figure describes part of the catalogue only.
+
+WHAT THIS CAN'T ANSWER (margin subject):
+- Net profit. Shipping costs, payment fees, overheads and refunds aren't in cost of goods.
+- Margin by product. Not split here; the merchant can see costs per product in WP Admin > Products.
 
 ================================================================================
 GLOBAL: how to phrase follow-ups and gaps
@@ -390,6 +436,9 @@ DESCRIPTION,
 						'customer_value',
 						'tax',
 						'refunds',
+						'customer_concentration',
+						'fulfilment',
+						'margin',
 					),
 				),
 				'period'     => array(
@@ -537,6 +586,15 @@ DESCRIPTION,
 
 			case 'refunds':
 				return AnalyticsService::fetch_refund_analysis( $period, $date_start, $date_end, $compare, 'none', 10, true );
+
+			case 'customer_concentration':
+				return InsightsService::fetch_customer_concentration( $period, $date_start, $date_end, $compare );
+
+			case 'fulfilment':
+				return InsightsService::fetch_fulfilment( $period, $date_start, $date_end, $compare );
+
+			case 'margin':
+				return InsightsService::fetch_margin( $period, $date_start, $date_end, $compare );
 
 			default:
 				return new \WP_Error(

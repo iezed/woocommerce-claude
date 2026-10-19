@@ -12,6 +12,7 @@
 
 use WooCommerce\Briefing\Abilities;
 use WooCommerce\Briefing\Plugin;
+use WooCommerce\CommerceAbilities\Analytics\AnalyticsService;
 
 /**
  * Tests for plugins/briefing-for-woocommerce.
@@ -55,9 +56,9 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 
 	/**
 	 * The server lives at /wp-json/briefing-for-woocommerce/mcp with exactly the
-	 * five tools, and no resources or prompts.
+	 * briefing's tools, and no resources or prompts.
 	 */
-	public function test_server_exposes_exactly_the_five_tools() {
+	public function test_server_exposes_exactly_the_briefing_tools() {
 		$server = \WP\MCP\Core\McpAdapter::instance()->get_server( Plugin::MCP_SERVER_ID );
 		$this->assertNotNull( $server, 'Briefing MCP server must be registered.' );
 		$this->assertSame( 'briefing-for-woocommerce', $server->get_server_route_namespace() );
@@ -69,7 +70,7 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 		}
 		sort( $names );
 		$this->assertSame(
-			array( 'briefing-breakdown', 'briefing-series', 'briefing-stock-at-risk', 'briefing-store-profile', 'briefing-totals' ),
+			array( 'briefing-breakdown', 'briefing-rows', 'briefing-series', 'briefing-stock-at-risk', 'briefing-store-profile', 'briefing-totals' ),
 			$names
 		);
 		$this->assertCount( 0, $server->get_resources() );
@@ -191,12 +192,549 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
 		$result = wp_get_ability( Abilities::TOTALS )->execute(
 			array(
-				'subject'    => 'tax',
+				'subject'    => 'top_customers',
 				'date_start' => '2026-03-02',
 				'date_end'   => '2026-03-08',
 			)
 		);
 		$this->assertWPError( $result );
+	}
+
+	/**
+	 * Tax totals and the per-rate breakdown come through, matching the shared
+	 * tools.
+	 */
+	public function test_tax_totals_and_breakdown() {
+		$rate = $this->seed_tax_rate(
+			array(
+				'country' => 'GB',
+				'name'    => 'VAT',
+				'rate'    => '20.0000',
+			)
+		);
+		$this->seed_paid_order(
+			array(
+				'customer_id' => $this->seed_customer(),
+				'total'       => 120,
+				'date'        => '2026-03-04 12:00:00',
+				'tax_total'   => 20,
+				'tax_rate_id' => $rate,
+			)
+		);
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$week = array(
+			'date_start' => '2026-03-02',
+			'date_end'   => '2026-03-08',
+		);
+
+		$totals = wp_get_ability( Abilities::TOTALS )->execute( array( 'subject' => 'tax' ) + $week );
+		$this->assertIsArray( $totals, is_wp_error( $totals ) ? $totals->get_error_message() : '' );
+		$this->assertSame( 'tax', $totals['subject'] );
+		$this->assertSame(
+			Abilities::without_people( \WooCommerce\CommerceAbilities\Abilities\AnalyticsTotalsAbility::execute( array( 'subject' => 'tax' ) + $week ) ),
+			$totals
+		);
+
+		$breakdown = wp_get_ability( Abilities::BREAKDOWN )->execute(
+			array(
+				'subject'   => 'tax',
+				'dimension' => 'rate',
+			) + $week
+		);
+		$this->assertIsArray( $breakdown, is_wp_error( $breakdown ) ? $breakdown->get_error_message() : '' );
+		$this->assertSame( 'rate', $breakdown['dimension'] );
+	}
+
+	/**
+	 * Orders and customers are aggregate-only on the rows tool; products can be
+	 * listed.
+	 */
+	public function test_rows_lists_products_only() {
+		$product = $this->seed_simple_product(
+			array(
+				'name'  => 'Listed mug',
+				'price' => 10,
+			)
+		);
+		$this->seed_paid_order(
+			array(
+				'customer_id' => $this->seed_customer(),
+				'total'       => 0,
+				'date'        => $this->days_ago( 2 ) . ' 12:00:00',
+				'items'       => array(
+					array(
+						'product_id' => $product,
+						'qty'        => 1,
+					),
+				),
+			)
+		);
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$recent = $this->recent_range( 7 );
+
+		foreach ( array( 'orders', 'customers' ) as $entity ) {
+			$result = wp_get_ability( Abilities::ROWS )->execute(
+				array(
+					'entity' => $entity,
+					'mode'   => 'rows',
+				) + $recent
+			);
+			$this->assertWPError( $result, $entity );
+			$this->assertSame( 'briefing_rows_aggregate_only', $result->get_error_code(), $entity );
+
+			$aggregate = wp_get_ability( Abilities::ROWS )->execute( array( 'entity' => $entity ) + $recent );
+			$this->assertIsArray( $aggregate, is_wp_error( $aggregate ) ? $aggregate->get_error_message() : $entity );
+			$this->assertSame( 'aggregate', $aggregate['mode'] );
+			$this->assertNull( $aggregate['rows'], $entity );
+		}
+
+		$products = wp_get_ability( Abilities::ROWS )->execute(
+			array(
+				'entity' => 'products',
+				'mode'   => 'rows',
+				'limit'  => 5,
+			) + $recent
+		);
+		$this->assertIsArray( $products, is_wp_error( $products ) ? $products->get_error_message() : '' );
+		$this->assertContains( $product, array_map( 'intval', wp_list_pluck( $products['rows'], 'product_id' ) ) );
+
+		$too_many = wp_get_ability( Abilities::ROWS )->execute(
+			array(
+				'entity' => 'products',
+				'mode'   => 'rows',
+				'limit'  => Abilities::ROWS_MAX_LIMIT + 1,
+			) + $recent
+		);
+		$this->assertWPError( $too_many, 'Limit above the cap is refused by the schema.' );
+	}
+
+	/**
+	 * The rows tool's dates: at most 366 days, no more than three years back, no
+	 * later than today, and real dates.
+	 */
+	public function test_rows_date_caps() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$today = new DateTimeImmutable( 'today', wp_timezone() );
+
+		$ok = wp_get_ability( Abilities::ROWS )->execute(
+			array(
+				'entity'     => 'orders',
+				'date_start' => $today->modify( '-365 days' )->format( 'Y-m-d' ),
+				'date_end'   => $today->format( 'Y-m-d' ),
+			)
+		);
+		$this->assertIsArray( $ok, '366 days ending today is allowed: ' . ( is_wp_error( $ok ) ? $ok->get_error_message() : '' ) );
+
+		$refused = array(
+			'367 days'          => array( $today->modify( '-366 days' ), $today ),
+			'ends tomorrow'     => array( $today->modify( '-5 days' ), $today->modify( '+1 day' ) ),
+			'over 3 years back' => array( $today->modify( '-3 years -1 day' ), $today->modify( '-3 years +10 days' ) ),
+			'start after end'   => array( $today, $today->modify( '-1 day' ) ),
+		);
+		foreach ( $refused as $label => $range ) {
+			$result = wp_get_ability( Abilities::ROWS )->execute(
+				array(
+					'entity'     => 'orders',
+					'date_start' => $range[0]->format( 'Y-m-d' ),
+					'date_end'   => $range[1]->format( 'Y-m-d' ),
+				)
+			);
+			$this->assertWPError( $result, $label );
+			$this->assertSame( 'briefing_rows_date_range', $result->get_error_code(), $label );
+		}
+
+		$this->assertWPError( Abilities::check_rows_dates( '2026-02-30', '2026-03-02' ), 'Not a real date.' );
+		$this->assertWPError(
+			wp_get_ability( Abilities::ROWS )->execute( array( 'entity' => 'orders' ) ),
+			'Dates are required.'
+		);
+	}
+
+	/**
+	 * Filters that can point at one customer are refused.
+	 */
+	public function test_rows_refuses_identifying_filters() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		foreach ( array(
+			'customers' => array( 'customer_id', 'postcode', 'city' ),
+			'orders'    => array( 'billing_postcode', 'billing_city' ),
+		) as $entity => $fields ) {
+			foreach ( $fields as $field ) {
+				$result = wp_get_ability( Abilities::ROWS )->execute(
+					array(
+						'entity'  => $entity,
+						'filters' => array(
+							array(
+								'field'    => $field,
+								'operator' => 'is',
+								'value'    => 'X',
+							),
+						),
+					) + $this->recent_range( 7 )
+				);
+				$this->assertWPError( $result, "{$entity}.{$field}" );
+				$this->assertSame( 'briefing_rows_identifying_filter', $result->get_error_code() );
+			}
+		}
+	}
+
+	/**
+	 * A filter matching fewer than three orders or customers gives the count
+	 * alone; three or more give the sums.
+	 */
+	public function test_rows_withholds_sums_for_small_groups() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$germany = array(
+			'entity'  => 'orders',
+			'filters' => array(
+				array(
+					'field'    => 'billing_country',
+					'operator' => 'is',
+					'value'    => 'DE',
+				),
+			),
+		) + $this->recent_range( 7 );
+
+		for ( $i = 0; $i < 2; $i++ ) {
+			$this->seed_paid_order(
+				array(
+					'customer_id'     => $this->seed_customer(),
+					'total'           => 150 + $i,
+					'date'            => $this->days_ago( 1 ) . ' 10:00:00',
+					'billing_country' => 'DE',
+				)
+			);
+		}
+		$small = wp_get_ability( Abilities::ROWS )->execute( $germany );
+		$this->assertIsArray( $small, is_wp_error( $small ) ? $small->get_error_message() : '' );
+		$this->assertSame( array( 'matched_count' => 2 ), $small['summary'] );
+		$this->assertArrayNotHasKey( 'share_of_revenue_percent', $small['share_of_universe'] );
+		$this->assertNull( $small['pipeline'] );
+		$this->assertNull( $small['admin_equivalent'] );
+		$this->assertStringNotContainsString( '150', wp_json_encode( $small['summary'] ) );
+
+		$this->seed_paid_order(
+			array(
+				'customer_id'     => $this->seed_customer(),
+				'total'           => 152,
+				'date'            => $this->days_ago( 1 ) . ' 11:00:00',
+				'billing_country' => 'DE',
+			)
+		);
+		$this->flush_analytics_cache();
+		$enough = wp_get_ability( Abilities::ROWS )->execute( $germany );
+		$this->assertSame( 3, $enough['summary']['matched_count'] );
+		$this->assertEqualsWithDelta( 453.0, $enough['summary']['net_revenue'], 0.01 );
+	}
+
+	/**
+	 * The new totals come through the Briefing tools unchanged apart from
+	 * person keys, and a guest's email never leaves the concentration query.
+	 */
+	public function test_new_totals_match_the_shared_tools() {
+		foreach ( array( 'Big.Spender@example.test', 'big.spender@example.test' ) as $i => $email ) {
+			$order = wc_create_order();
+			$order->set_billing_email( $email );
+			$order->set_total( 500 );
+			$order->set_status( 'completed' );
+			$order->set_date_created( '2026-03-0' . ( 3 + $i ) . ' 10:00:00' );
+			$order->set_date_paid( '2026-03-0' . ( 3 + $i ) . ' 10:00:00' );
+			$order->save();
+			\Automattic\WooCommerce\Admin\API\Reports\Orders\Stats\DataStore::sync_order( $order->get_id() );
+		}
+		$this->seed_paid_order(
+			array(
+				'customer_id' => $this->seed_customer(),
+				'total'       => 100,
+				'date'        => '2026-03-05 12:00:00',
+			)
+		);
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$week = array(
+			'date_start' => '2026-03-02',
+			'date_end'   => '2026-03-08',
+		);
+
+		$shared = \WooCommerce\CommerceAbilities\Abilities\AnalyticsTotalsAbility::execute( array( 'subject' => 'customer_concentration' ) + $week );
+		$this->assertSame( 2, $shared['metrics']['customers_count'], 'The guest is one customer across both orders.' );
+		$this->assertSame( 90.9, $shared['metrics']['top_20_percent_share_percent'] );
+
+		$ours = wp_get_ability( Abilities::TOTALS )->execute( array( 'subject' => 'customer_concentration' ) + $week );
+		$this->assertIsArray( $ours, is_wp_error( $ours ) ? $ours->get_error_message() : '' );
+		$this->assertSame( 2, $ours['metrics']['customers_count'] );
+		$this->assertNull( $ours['metrics']['top_20_percent_share_percent'], 'Two customers: shares would describe each of them.' );
+		$this->assertStringNotContainsString( 'big.spender', strtolower( wp_json_encode( $ours ) ) );
+		$this->assertSame( Abilities::without_people( Abilities::concentration_without_small_groups( $shared ) ), $ours );
+
+		$cohorts = wp_get_ability( Abilities::BREAKDOWN )->execute(
+			array(
+				'subject'   => 'cohorts',
+				'dimension' => 'coupon',
+			) + $week
+		);
+		$this->assertIsArray( $cohorts, is_wp_error( $cohorts ) ? $cohorts->get_error_message() : '' );
+		$this->assertSame( 'cohorts', $cohorts['subject'] );
+	}
+
+	/**
+	 * Concentration figures that would describe fewer than three customers are
+	 * null: the spend figures with that few customers, the top fifth when it's
+	 * that few, and the top 10 when the rest are.
+	 */
+	public function test_concentration_withholds_small_groups() {
+		$metrics = function ( $count, $top_10, $top_fifth ) {
+			return array(
+				'customers_count'                => $count,
+				'revenue'                        => 1000.0,
+				'avg_spend_per_customer'         => 10.0,
+				'median_spend_per_customer'      => 10.0,
+				'top_10_customers_count'         => $top_10,
+				'top_10_revenue'                 => 900.0,
+				'top_10_share_percent'           => 90.0,
+				'top_20_percent_customers_count' => $top_fifth,
+				'top_20_percent_revenue'         => 500.0,
+				'top_20_percent_share_percent'   => 50.0,
+			);
+		};
+
+		$two = Abilities::concentration_without_small_groups( array( 'metrics' => $metrics( 2, 2, 1 ) ) );
+		$this->assertSame( 1000.0, $two['metrics']['revenue'], 'The period\'s revenue is a store total and stays.' );
+		foreach ( array( 'avg_spend_per_customer', 'median_spend_per_customer', 'top_10_revenue', 'top_20_percent_revenue', 'top_20_percent_share_percent' ) as $key ) {
+			$this->assertNull( $two['metrics'][ $key ], $key );
+		}
+		$this->assertStringContainsString( 'fewer than 3', $two['note'] );
+
+		$five = Abilities::concentration_without_small_groups( array( 'metrics' => $metrics( 5, 5, 1 ) ) );
+		$this->assertSame( 10.0, $five['metrics']['median_spend_per_customer'] );
+		$this->assertSame( 900.0, $five['metrics']['top_10_revenue'], 'With 5 customers the top 10 is everyone.' );
+		$this->assertNull( $five['metrics']['top_20_percent_revenue'], 'The top fifth of 5 is one customer.' );
+
+		$twelve = Abilities::concentration_without_small_groups(
+			array(
+				'metrics'    => $metrics( 12, 10, 3 ),
+				'comparison' => array(
+					'metrics' => $metrics( 20, 10, 4 ),
+					'changes' => array(
+						'top_10_share_percent'         => array( 'difference' => 1.0 ),
+						'top_20_percent_share_percent' => array( 'difference' => 1.0 ),
+					),
+				),
+			)
+		);
+		$this->assertNull( $twelve['metrics']['top_10_revenue'], 'Revenue less the top 10 would be the other two customers.' );
+		$this->assertSame( 500.0, $twelve['metrics']['top_20_percent_revenue'] );
+		$this->assertSame( 900.0, $twelve['comparison']['metrics']['top_10_revenue'] );
+		$this->assertNull( $twelve['comparison']['changes']['top_10_share_percent'], 'A change against a withheld figure goes too.' );
+		$this->assertSame( array( 'difference' => 1.0 ), $twelve['comparison']['changes']['top_20_percent_share_percent'] );
+
+		$this->assertArrayNotHasKey( 'note', Abilities::concentration_without_small_groups( array( 'metrics' => $metrics( 20, 10, 4 ) ) ) );
+	}
+
+	/**
+	 * Cohorts of fewer than three customers keep their count but not their
+	 * repeat or lifetime figures, and neither do the totals when the customers
+	 * outside the listed cohorts are that few.
+	 */
+	public function test_cohorts_withhold_small_groups() {
+		$cohort = function ( $key, $customers ) {
+			return array(
+				'key'                 => $key,
+				'customers_count'     => $customers,
+				'repeat_customers'    => 1,
+				'repeat_rate_percent' => 20.0,
+				'avg_lifetime_spend'  => 75.0,
+				'avg_lifetime_orders' => 1.5,
+			);
+		};
+		$result = function ( $size, array $groups ) {
+			return array(
+				'totals'     => array(
+					'customers_count'     => $size,
+					'repeat_customers'    => 2,
+					'repeat_rate_percent' => 25.0,
+					'avg_lifetime_spend'  => 80.0,
+					'avg_lifetime_orders' => 1.4,
+				),
+				'top_groups' => $groups,
+			);
+		};
+
+		$small = Abilities::cohorts_without_small_groups( $result( 6, array( $cohort( 'Direct', 5 ), $cohort( 'personal-code', 1 ) ) ) );
+		$this->assertSame( 75.0, $small['top_groups'][0]['avg_lifetime_spend'] );
+		$this->assertSame( 1, $small['top_groups'][1]['customers_count'] );
+		$this->assertNull( $small['top_groups'][1]['avg_lifetime_spend'] );
+		$this->assertNull( $small['top_groups'][1]['repeat_rate_percent'] );
+		$this->assertNull( $small['totals']['avg_lifetime_spend'], 'The totals less Direct would be the one customer.' );
+		$this->assertSame( 6, $small['totals']['customers_count'] );
+
+		$unlisted = Abilities::cohorts_without_small_groups( $result( 7, array( $cohort( 'Direct', 5 ) ) ) );
+		$this->assertNull( $unlisted['totals']['avg_lifetime_spend'], 'Two customers sit outside the listed cohorts.' );
+
+		$enough = Abilities::cohorts_without_small_groups( $result( 8, array( $cohort( 'Direct', 5 ), $cohort( 'Email', 3 ) ) ) );
+		$this->assertSame( 80.0, $enough['totals']['avg_lifetime_spend'] );
+		$this->assertSame( 75.0, $enough['top_groups'][1]['avg_lifetime_spend'] );
+		$this->assertArrayNotHasKey( 'note', $enough );
+	}
+
+	/**
+	 * A filter that leaves fewer than three orders out of the period gives the
+	 * count alone too: its sums, taken from the universe the same response
+	 * carries, would give the orders left out.
+	 */
+	public function test_rows_withholds_sums_when_few_are_left_out() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$germany = array(
+			'entity'  => 'orders',
+			'filters' => array(
+				array(
+					'field'    => 'billing_country',
+					'operator' => 'is',
+					'value'    => 'DE',
+				),
+			),
+		) + $this->recent_range( 7 );
+
+		foreach ( array( 'DE', 'DE', 'DE', 'FR' ) as $i => $country ) {
+			$this->seed_paid_order(
+				array(
+					'customer_id'     => $this->seed_customer(),
+					'total'           => 100 + $i,
+					'date'            => $this->days_ago( 1 ) . ' 10:00:00',
+					'billing_country' => $country,
+				)
+			);
+		}
+		$one_left_out = wp_get_ability( Abilities::ROWS )->execute( $germany );
+		$this->assertIsArray( $one_left_out, is_wp_error( $one_left_out ) ? $one_left_out->get_error_message() : '' );
+		$this->assertSame( array( 'matched_count' => 3 ), $one_left_out['summary'] );
+		$this->assertArrayNotHasKey( 'share_of_revenue_percent', $one_left_out['share_of_universe'] );
+
+		foreach ( array( 1, 2 ) as $i ) {
+			$this->seed_paid_order(
+				array(
+					'customer_id'     => $this->seed_customer(),
+					'total'           => 110 + $i,
+					'date'            => $this->days_ago( 1 ) . ' 11:00:00',
+					'billing_country' => 'FR',
+				)
+			);
+		}
+		$this->flush_analytics_cache();
+		$three_left_out = wp_get_ability( Abilities::ROWS )->execute( $germany );
+		$this->assertEqualsWithDelta( 303.0, $three_left_out['summary']['net_revenue'], 0.01 );
+	}
+
+	/**
+	 * The pipeline and dashboard-matching blocks drop to counts when they, or
+	 * what they add to the summary, are one or two orders.
+	 */
+	public function test_rows_withholds_sibling_sums_that_subtract_to_one_order() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$germany = array(
+			'entity'  => 'orders',
+			'filters' => array(
+				array(
+					'field'    => 'billing_country',
+					'operator' => 'is',
+					'value'    => 'DE',
+				),
+			),
+		) + $this->recent_range( 7 );
+
+		foreach ( array( 'completed', 'completed', 'completed', 'refunded', 'on-hold' ) as $i => $status ) {
+			$this->seed_paid_order(
+				array(
+					'customer_id'     => $this->seed_customer(),
+					'total'           => 200 + $i,
+					'status'          => $status,
+					'date'            => $this->days_ago( 1 ) . ' 10:00:00',
+					'billing_country' => 'DE',
+				)
+			);
+		}
+		$result = wp_get_ability( Abilities::ROWS )->execute( $germany );
+		$this->assertIsArray( $result, is_wp_error( $result ) ? $result->get_error_message() : '' );
+		$this->assertSame( 3, $result['summary']['matched_count'] );
+		$this->assertArrayHasKey( 'net_revenue', $result['summary'], 'Three paid orders, none left out: sums stay.' );
+		$this->assertSame( array( 'matched_count' => 1 ), $result['pipeline'], 'One on-hold order: count only.' );
+		$this->assertSame( array( 'matched_count' ), array_keys( $result['admin_equivalent'] ), 'Less the summary, it is one refunded order: count only.' );
+		$this->assertStringNotContainsString( '203', wp_json_encode( $result ) );
+		$this->assertStringNotContainsString( '204', wp_json_encode( $result ) );
+	}
+
+	/**
+	 * Orders and customers filter only on Briefing's allowlist, and every field
+	 * in the shared registries is either allowed or refused as identifying, so
+	 * a field added there fails this test until it's been looked at.
+	 */
+	public function test_rows_filters_are_an_allowlist() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$result = wp_get_ability( Abilities::ROWS )->execute(
+			array(
+				'entity'  => 'orders',
+				'filters' => array(
+					array(
+						'field'    => 'billing_email',
+						'operator' => 'is',
+						'value'    => 'someone@example.com',
+					),
+				),
+			) + $this->recent_range( 7 )
+		);
+		$this->assertWPError( $result );
+		$this->assertSame( 'briefing_rows_filter_not_allowed', $result->get_error_code() );
+
+		foreach ( array(
+			'orders'    => 'qa_orders_field_registry',
+			'customers' => 'qa_customers_field_registry',
+		) as $entity => $method ) {
+			$registry = new ReflectionMethod( AnalyticsService::class, $method );
+			$registry->setAccessible( true );
+			foreach ( array_keys( $registry->invoke( null ) ) as $field ) {
+				$this->assertTrue(
+					in_array( $field, Abilities::ROWS_FILTER_FIELDS[ $entity ], true ) || in_array( $field, Abilities::IDENTIFYING_FIELDS, true ),
+					"{$entity}.{$field} is in the shared registry but neither allowed nor refused by Briefing."
+				);
+			}
+		}
+	}
+
+	/**
+	 * No tool output, for any subject, carries a person key, an email address or
+	 * a pseudonymised customer label.
+	 */
+	public function test_no_person_keys_in_any_output() {
+		$product = $this->seed_simple_product(
+			array(
+				'name'  => 'Privacy mug',
+				'price' => 15,
+			)
+		);
+		foreach ( array( 'GB', 'GB', 'DE', 'FR' ) as $i => $country ) {
+			$this->seed_paid_order(
+				array(
+					'customer_id'      => $this->seed_customer( "shopper{$i}@example.test" ),
+					'total'            => 0,
+					'date'             => $this->days_ago( $i + 1 ) . ' 12:00:00',
+					'billing_country'  => $country,
+					'billing_email'    => "shopper{$i}@example.test",
+					'shipping_country' => $country,
+					'items'            => array(
+						array(
+							'product_id' => $product,
+							'qty'        => 2,
+						),
+					),
+				)
+			);
+		}
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+
+		foreach ( $this->every_tool_call() as $label => $call ) {
+			$result = wp_get_ability( $call[0] )->execute( $call[1] );
+			$this->assertNotWPError( $result, $label . ': ' . ( is_wp_error( $result ) ? $result->get_error_message() : '' ) );
+			$this->assert_no_people( $result, $label );
+		}
 	}
 
 	/**
@@ -407,6 +945,130 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 			array( 'someone-else/plugin.php', plugin_basename( BRIEFING_FOR_WOOCOMMERCE_PLUGIN_FILE ) ),
 			get_site_option( 'auto_update_plugins' )
 		);
+	}
+
+	/**
+	 * Every tool with every subject (and a dimension each), over the last week.
+	 *
+	 * @return array<string, array{0: string, 1: array}>
+	 */
+	private function every_tool_call() {
+		$week  = $this->recent_range( 7 );
+		$calls = array();
+		foreach ( array( 'revenue', 'orders', 'customers', 'customer_value', 'tax', 'refunds', 'customer_concentration', 'fulfilment', 'margin' ) as $subject ) {
+			$calls[ "totals {$subject}" ] = array( Abilities::TOTALS, array( 'subject' => $subject ) + $week );
+		}
+		foreach ( array(
+			'revenue'       => array( 'category', 'country', 'state', 'shipping_country', 'payment_method', 'shipping_method' ),
+			'attribution'   => array( 'channel' ),
+			'products'      => array( 'product', 'variation' ),
+			'refunds'       => array( 'product', 'country', 'customer_type' ),
+			'tax'           => array( 'rate' ),
+			'coupons'       => array( 'code' ),
+			'customers'     => array( 'country' ),
+			'cohorts'       => array( 'channel', 'coupon', 'product' ),
+			'product_pairs' => array( 'pair' ),
+			'fulfilment'    => array( 'shipping_method' ),
+		) as $subject => $dimensions ) {
+			foreach ( $dimensions as $dimension ) {
+				$calls[ "breakdown {$subject} by {$dimension}" ] = array(
+					Abilities::BREAKDOWN,
+					array(
+						'subject'   => $subject,
+						'dimension' => $dimension,
+					) + $week,
+				);
+			}
+		}
+		foreach ( array( 'customers', 'products' ) as $subject ) {
+			$calls[ "series {$subject}" ] = array(
+				Abilities::SERIES,
+				array(
+					'subject'  => $subject,
+					'interval' => 'day',
+				) + $week,
+			);
+		}
+		foreach ( array( 'orders', 'customers', 'products' ) as $entity ) {
+			$calls[ "rows {$entity}" ] = array( Abilities::ROWS, array( 'entity' => $entity ) + $week );
+		}
+		$calls['rows products listed'] = array(
+			Abilities::ROWS,
+			array(
+				'entity' => 'products',
+				'mode'   => 'rows',
+			) + $week,
+		);
+		$calls['stock at risk']        = array( Abilities::STOCK_AT_RISK, array( 'kind' => 'low' ) + $week );
+		$calls['store profile']        = array( Abilities::STORE_PROFILE, array() );
+		return $calls;
+	}
+
+	/**
+	 * Assert a tool result has no person key at any depth, no email address and
+	 * no pseudonymised customer label.
+	 *
+	 * @param mixed  $value Tool result.
+	 * @param string $label What was called.
+	 */
+	private function assert_no_people( $value, $label ) {
+		$json = wp_json_encode( $value );
+		$this->assertDoesNotMatchRegularExpression( '/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/', $json, "{$label}: email address" );
+		$this->assertStringNotContainsString( 'Customer #', $json, "{$label}: customer label" );
+		$this->assertSame( array(), $this->person_keys_in( $value ), "{$label}: person keys" );
+	}
+
+	/**
+	 * Person keys found in a value, at any depth.
+	 *
+	 * @param mixed $value Value.
+	 * @return array<int, string>
+	 */
+	private function person_keys_in( $value ) {
+		$found = array();
+		if ( ! is_array( $value ) ) {
+			return $found;
+		}
+		foreach ( $value as $key => $item ) {
+			if ( is_string( $key ) && in_array( $key, Abilities::PERSON_KEYS, true ) ) {
+				$found[] = $key;
+			}
+			$found = array_merge( $found, $this->person_keys_in( $item ) );
+		}
+		return $found;
+	}
+
+	/**
+	 * A date some days before today, in the store's time zone.
+	 *
+	 * @param int $days Days ago.
+	 * @return string YYYY-MM-DD.
+	 */
+	private function days_ago( $days ) {
+		return ( new DateTimeImmutable( 'today', wp_timezone() ) )->modify( "-{$days} days" )->format( 'Y-m-d' );
+	}
+
+	/**
+	 * The last $days days, ending today.
+	 *
+	 * @param int $days Days in the range.
+	 * @return array{date_start: string, date_end: string}
+	 */
+	private function recent_range( $days ) {
+		return array(
+			'date_start' => $this->days_ago( $days - 1 ),
+			'date_end'   => $this->days_ago( 0 ),
+		);
+	}
+
+	/**
+	 * Clear cached analytics responses so a re-read sees new fixtures.
+	 */
+	private function flush_analytics_cache() {
+		global $wpdb;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery -- test cache reset.
+		$wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE '\\_transient\\_woocommerce\\_claude\\_%' OR option_name LIKE '\\_transient\\_timeout\\_woocommerce\\_claude\\_%'" );
+		wp_cache_flush();
 	}
 
 	/**

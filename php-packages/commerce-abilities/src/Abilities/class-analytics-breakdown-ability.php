@@ -11,6 +11,7 @@ namespace WooCommerce\CommerceAbilities\Abilities;
 
 use WooCommerce\CommerceAbilities\Abilities\LargeRangeGate;
 use WooCommerce\CommerceAbilities\Analytics\AnalyticsService;
+use WooCommerce\CommerceAbilities\Analytics\InsightsService;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -32,7 +33,7 @@ class AnalyticsBreakdownAbility {
 				// phpcs:disable WordPress.WP.I18n.NonSingularStringLiteralText -- Consolidated multi-subject narrative; per-subject sections follow.
 				'description'         => __(
 					<<<'DESCRIPTION'
-"Broken-down-by-X" aggregate for one of six subjects — revenue, attribution, products, refunds, tax, coupons. Exactly one (subject, dimension) per call; the dimension space varies by subject and is enforced server-side. For headline-aggregate questions use the totals tool; for time-series use the series tool; for "show me the actual records" use the rows tool.
+"Broken-down-by-X" aggregate for one of ten subjects — revenue, attribution, products, refunds, tax, coupons, customers, cohorts, product_pairs, fulfilment. Exactly one (subject, dimension) per call; the dimension space varies by subject and is enforced server-side. For headline-aggregate questions use the totals tool; for time-series use the series tool; for "show me the actual records" use the rows tool.
 
 UNIVERSAL RULES (the connector instructions carry these in full):
 - Never quote internal field paths in merchant-facing text. Field paths are for YOUR orientation; merchants see plain-English names ("collected revenue from Germany", "pending revenue on BACS orders", "the dashboard-matching figure"). Same applies to formula breakdowns: explain in English ("net sales are gross sales minus refunds") rather than pasting field-name arithmetic.
@@ -51,12 +52,14 @@ For revenue / attribution / products / coupons, each row in top_groups (or top_p
 Subjects that DON'T follow three-views-per-row: refunds (refunds are inherently a slice — the period semantics are refund-issued, not order-placed). Tax has three views at the totals level but per-rate rows are aggregated tax-only (no pipeline-per-rate column).
 
 ================================================================================
-SUBJECT = revenue  → broken down by category, country, payment_method, or shipping_method
+SUBJECT = revenue  → broken down by category, country, state, shipping_country, payment_method, or shipping_method
 ================================================================================
 
 GROUPING DIMENSIONS:
 - category (default): product category via wc_order_product_lookup. Product-level roll-up, so an order with products in multiple categories contributes its subtotals to EACH category — per-category totals don't sum to whole-order totals on multi-category baskets. That's intentional; explain it if the merchant notices.
 - country: billing country. Refund sub-orders inherit the parent order's country, so a refunded order's country moves with the original purchase.
+- state: billing state / region, keyed "US:CA" and labelled with the region's name ("California, US"). Orders whose billing address has no state (common outside the US, Canada and Australia) land in (Unassigned).
+- shipping_country: the country the order was shipped to. Orders with no shipping address (digital, some local pickup) land in (Unassigned).
 - payment_method: human-readable payment method title (falls back to the slug when empty). "Stripe", "PayPal", "Cheque", "Direct Bank Transfer" and so on — whatever the merchant's gateways registered. We don't normalise variants ("Stripe" vs "stripe_cc").
 - shipping_method: one shipping method per order. Orders without a shipping line (digital, local pickup with no fee) land in (Unassigned) — that's honest "no shipping was charged" signal, not missing data.
 
@@ -82,8 +85,7 @@ REGULATORY THRESHOLDS (strongest on dimension=country): when a country row's ann
 
 WHAT THIS CAN'T ANSWER (revenue subject):
 - Per-product revenue within a category. Use subject=products instead.
-- State, city, or postal-code splits. Country only. Point at WP Admin orders screen with a country filter for regional drill-in.
-- Shipping-country breakdown (as opposed to billing). Only billing country is exposed.
+- City or postal-code splits. Country, state / region and shipping country only. Point at WP Admin orders screen for a finer regional drill-in.
 - Per-coupon revenue. Use subject=coupons.
 - Why a country, category, or payment method moved up or down. The comparison block gives you the delta; the cause (campaigns, seasonality, pricing) isn't in the data.
 - Conversion rate per dimension (orders ÷ visitors). Requires visitor counts — steer to Jetpack Stats / GA4 / Parse.ly.
@@ -202,7 +204,7 @@ GOOD FOLLOW-UPS:
 - "Show me the actual orders for this product" → wc-analytics-rows entity=orders with a product_id filter
 
 ================================================================================
-SUBJECT = refunds  → grouped refund analysis (top refunded products, top refunded countries) — for the headline refund metrics + timing buckets, use totals subject=refunds.
+SUBJECT = refunds  → grouped refund analysis (top refunded products, top refunded countries, new vs returning customers) — for the headline refund metrics + timing buckets, use totals subject=refunds.
 ================================================================================
 
 PERIOD SEMANTICS — REFUND-ISSUED, NOT ORDER-PLACED (same as totals subject=refunds):
@@ -211,6 +213,7 @@ The date window applies to the refund sub-order's own creation date — so "refu
 GROUPING DIMENSIONS:
 - product: top refunded products via wc_order_product_lookup. A refund touching two product lines contributes to two rows — per-product refund amounts can therefore sum to more than the headline refunds_amount on multi-line refunds. Same shape as subject=revenue dimension=category; flag if the merchant notices.
 - country: top refunded billing countries. Refunds inherit the parent order's billing country (same rule as subject=revenue dimension=country).
+- customer_type: refunds split into new and returning customers, by the refunded order's returning-customer flag (set when it was placed). gross_revenue on each row is that group's paid revenue in the period, so the two refund rates compare like with like.
 
 EACH top_groups ROW CARRIES:
 - refunds_amount, refunds_count, orders_refunded_count, gross_revenue (paid gross for that row's dimension value in the same period), avg_days_to_refund.
@@ -225,7 +228,7 @@ Good: "Germany's refund rate at 10.8% is more than double your store-wide baseli
 
 SMALL-N HONESTY — flag the sample size BEFORE the percentage. When refunds_count is small (≤5 typically), the per-row rate is mathematically true but interpretation-misleading. State the count explicitly. Note that one event would change the rate materially. Suggest the merchant gather more data before acting on the percentage alone.
 
-WHAT THIS CAN'T ANSWER: same gaps as totals subject=refunds (no reason aggregation, no per-coupon refund rate, no segment split, no day/hour, no shipping/tax-only splits, no chargeback distinction).
+WHAT THIS CAN'T ANSWER: same gaps as totals subject=refunds (no reason aggregation, no per-coupon refund rate, no day/hour, no shipping/tax-only splits, no chargeback distinction).
 
 GOOD FOLLOW-UPS:
 - "How does the top refunded product's sales volume look?" → wc-analytics-breakdown subject=products
@@ -315,6 +318,50 @@ GOOD FOLLOW-UPS:
 - "How did coupon-using customers' lifetime spend compare?" → wc-analytics-totals subject=customer_value
 
 ================================================================================
+SUBJECT = customers  → customers with a paid order in the period by billing country (dimension=country), each with new and returning counts, orders, revenue and share of customers.
+================================================================================
+
+COUNTING: new and returning follow each order's returning-customer flag, set when it was placed — a customer whose first and second orders both fall in the period counts in both, so new + returning can exceed customers_count. A customer who ordered with two billing countries counts in each. Read new_customer_share_percent and share_of_customers_percent; don't divide.
+
+WHAT THIS CAN'T ANSWER (customers subject):
+- Who the customers in a country are. Names and emails stay in WP Admin > WooCommerce > Customers.
+- Cities or postcodes. Country only here; revenue by state / region is subject=revenue, dimension=state.
+
+================================================================================
+SUBJECT = cohorts  → customers whose FIRST paid order was placed in the period, grouped by what that first order looked like: dimension=channel (its attribution channel), coupon (its coupon — the oldest, if it had several — or "(No coupon)"), or product (the products on it). Per cohort: customers_count, repeat_rate_percent (share who have ordered again since, up to today), avg_lifetime_spend and avg_lifetime_orders.
+================================================================================
+
+READ IT RIGHT:
+- Lifetime runs from the first order to today, so a recent period has had less time to repeat. Compare cohorts from the same period, not a recent cohort against an old one.
+- dimension=product overlaps: a customer whose first order had three products counts in all three cohorts. totals is the whole cohort counted once.
+- Each row carries sample_size_caveat when the cohort has 5 or fewer customers — quote it.
+- Pre-computed: repeat_rate_percent, share_of_cohort_percent. Don't divide.
+
+NARRATIVE: "Customers who first came through Organic Search came back 34% of the time, against 18% for those who first used SPRING20" is the shape. Don't present it as cause — the coupon may attract a different kind of shopper.
+
+WHAT THIS CAN'T ANSWER (cohorts subject):
+- Which customers are in a cohort. Individual customers stay in WP Admin > WooCommerce > Customers.
+- Month-by-month retention curves. For that shape use totals subject=customer_value, which carries cohort retention.
+
+================================================================================
+SUBJECT = product_pairs  → products bought together: the pairs of products in the most paid orders in the period (dimension=pair), each with orders_together, how often the first product's orders also had the second (and the reverse), and the pair's share of multi-product orders.
+================================================================================
+
+READ IT RIGHT: variations count as their parent product. totals.multi_product_share_percent says how common multi-product orders are at all — if it's low, pairs are a small story. Orders with more than 30 different products (usually trade orders) are left out and counted in totals.large_orders_excluded. Small counts (2–3 orders together) are coincidence more often than pattern; say so.
+
+WHAT THIS CAN'T ANSWER (product_pairs subject):
+- Groups of three or more products. Pairs only.
+- Why products are bought together, or whether bundling them would sell more.
+
+================================================================================
+SUBJECT = fulfilment  → fulfilment time (payment to completion) by shipping method (dimension=shipping_method): per method, fulfilled_orders, median_hours, p90_hours, avg_hours and the same buckets as totals subject=fulfilment.
+================================================================================
+
+Same definitions and caveats as totals subject=fulfilment: automatic completions sit outside the times, orders still processing are counted separately, and "completed" is a status the store sets, not a delivery confirmation. Rows with five or fewer fulfilled orders carry sample_size_caveat — quote it.
+
+WHAT THIS CAN'T ANSWER (fulfilment subject): carrier delivery times, or which individual orders were slow (WP Admin > WooCommerce > Orders).
+
+================================================================================
 GLOBAL: how to phrase follow-ups, gaps, and storage vocabulary
 ================================================================================
 
@@ -387,6 +434,10 @@ DESCRIPTION,
 						'refunds',
 						'tax',
 						'coupons',
+						'customers',
+						'cohorts',
+						'product_pairs',
+						'fulfilment',
 					),
 				),
 				'dimension'          => array(
@@ -394,6 +445,8 @@ DESCRIPTION,
 					'enum' => array(
 						'category',
 						'country',
+						'state',
+						'shipping_country',
 						'payment_method',
 						'shipping_method',
 						'channel',
@@ -408,6 +461,9 @@ DESCRIPTION,
 						'variation',
 						'rate',
 						'code',
+						'customer_type',
+						'coupon',
+						'pair',
 					),
 				),
 				'limit'              => array(
@@ -585,6 +641,18 @@ DESCRIPTION,
 			case 'coupons':
 				return AnalyticsService::fetch_coupon_performance( $period, $date_start, $date_end, $compare, $limit, $orderby );
 
+			case 'customers':
+				return InsightsService::fetch_customers_by_country( $period, $date_start, $date_end, $compare, $limit );
+
+			case 'cohorts':
+				return InsightsService::fetch_cohorts( $period, $date_start, $date_end, $dimension, $limit );
+
+			case 'product_pairs':
+				return InsightsService::fetch_product_pairs( $period, $date_start, $date_end, $limit );
+
+			case 'fulfilment':
+				return InsightsService::fetch_fulfilment_by_shipping_method( $period, $date_start, $date_end, $limit );
+
 			default:
 				return new \WP_Error( 'invalid_breakdown_subject', "Unknown breakdown subject: {$subject}.", array( 'status' => 400 ) );
 		}
@@ -599,12 +667,16 @@ DESCRIPTION,
 	 */
 	private static function validate_dimension( $subject, $dimension ) {
 		static $allowed = array(
-			'revenue'     => array( 'category', 'country', 'payment_method', 'shipping_method' ),
-			'attribution' => array( 'channel', 'source', 'medium', 'campaign', 'term', 'content', 'device', 'channel_source' ),
-			'products'    => array( 'product', 'variation' ),
-			'refunds'     => array( 'product', 'country' ),
-			'tax'         => array( 'rate' ),
-			'coupons'     => array( 'code' ),
+			'revenue'       => array( 'category', 'country', 'state', 'shipping_country', 'payment_method', 'shipping_method' ),
+			'attribution'   => array( 'channel', 'source', 'medium', 'campaign', 'term', 'content', 'device', 'channel_source' ),
+			'products'      => array( 'product', 'variation' ),
+			'refunds'       => array( 'product', 'country', 'customer_type' ),
+			'tax'           => array( 'rate' ),
+			'coupons'       => array( 'code' ),
+			'customers'     => array( 'country' ),
+			'cohorts'       => array( 'channel', 'coupon', 'product' ),
+			'product_pairs' => array( 'pair' ),
+			'fulfilment'    => array( 'shipping_method' ),
 		);
 
 		if ( ! isset( $allowed[ $subject ] ) ) {
@@ -646,6 +718,14 @@ DESCRIPTION,
 				return 'rate';
 			case 'coupons':
 				return 'code';
+			case 'customers':
+				return 'country';
+			case 'cohorts':
+				return 'channel';
+			case 'product_pairs':
+				return 'pair';
+			case 'fulfilment':
+				return 'shipping_method';
 			default:
 				return '';
 		}

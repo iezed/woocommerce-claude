@@ -5,7 +5,7 @@
     "license": "GPL-3.0-or-later",
     "require": {
         "php": ">=7.4",
-        "woocommerce/commerce-abilities": "0.2.0"
+        "woocommerce/commerce-abilities": "0.3.0"
     },
     "repositories": [
         {
@@ -14,7 +14,7 @@
             "options": {
                 "symlink": false,
                 "versions": {
-                    "woocommerce/commerce-abilities": "0.2.0"
+                    "woocommerce/commerce-abilities": "0.3.0"
                 }
             }
         }

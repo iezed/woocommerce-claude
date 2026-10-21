@@ -10,18 +10,27 @@ namespace WooCommerce\Briefing;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Wires the briefing's abilities to its own MCP server at
- * `/wp-json/briefing-for-woocommerce/mcp`, authenticated by the read-only key
+ * Answers the briefing's calls on one REST route,
+ * `/wp-json/briefing-for-woocommerce/call`, authenticated by the read-only key
  * the merchant approved on WooCommerce's own screen.
+ *
+ * Up to 0.3.0 this was an MCP server on the MCP adapter WooCommerce bundled.
+ * WooCommerce 11.3 stops bundling it, and the briefing only ever makes a fixed
+ * list of read calls, so a plain route does the same job with no dependency.
  */
 class Plugin {
 
 	/**
-	 * Server identity. The endpoint resolves to `/wp-json/<namespace>/<route>`.
+	 * The route resolves to `/wp-json/<namespace>/<route>`. The Briefing app
+	 * detects the plugin from the namespace's index, so keep it unversioned.
 	 */
-	const MCP_SERVER_ID    = 'briefing-for-woocommerce';
-	const MCP_SERVER_NS    = 'briefing-for-woocommerce';
-	const MCP_SERVER_ROUTE = 'mcp';
+	const REST_NAMESPACE = 'briefing-for-woocommerce';
+	const REST_ROUTE     = 'call';
+
+	/**
+	 * Most calls one request may carry. The briefing's weekly read is nine.
+	 */
+	const MAX_CALLS = 20;
 
 	/**
 	 * The start of the app name Briefing asks WooCommerce to approve a key for.
@@ -55,81 +64,137 @@ class Plugin {
 		add_action( 'wp_abilities_api_categories_init', array( Abilities::class, 'register_category' ) );
 		add_action( 'wp_abilities_api_init', array( Abilities::class, 'register' ) );
 
-		// WooCommerce only boots its vendored MCP adapter behind the `mcp_integration`
-		// feature flag; boot it ourselves. `instance()` is idempotent, so this is
-		// safe alongside WooCommerce or WooCommerce for Claude doing the same.
-		add_action( 'plugins_loaded', array( $this, 'bootstrap_mcp_adapter' ), 20 );
-
-		// The adapter's default server authorises any logged-in user with `read`,
-		// outside our key check. Same reasoning as WooCommerce for Claude.
-		add_filter( 'mcp_adapter_create_default_server', '__return_false' );
-
-		add_action( 'mcp_adapter_init', array( $this, 'register_mcp_server' ) );
+		add_action( 'rest_api_init', array( $this, 'register_route' ) );
 
 		// The `ck_…` consumer key isn't a WordPress login, so WordPress's
 		// application-password check would reject it with a 401 before our own
 		// check runs, on any site where an application password exists.
-		add_filter( 'application_password_is_api_request', array( $this, 'exclude_mcp_route_from_app_password_auth' ) );
+		add_filter( 'application_password_is_api_request', array( $this, 'exclude_route_from_app_password_auth' ) );
 	}
 
 	/**
-	 * Boot the WordPress MCP adapter vendored inside WooCommerce.
+	 * Register the route: POST only, behind the key check.
 	 */
-	public function bootstrap_mcp_adapter() {
-		if ( class_exists( '\\WP\\MCP\\Core\\McpAdapter' ) ) {
-			\WP\MCP\Core\McpAdapter::instance();
-		}
+	public function register_route() {
+		register_rest_route(
+			self::REST_NAMESPACE,
+			'/' . self::REST_ROUTE,
+			array(
+				'methods'             => 'POST',
+				'callback'            => array( $this, 'call' ),
+				'permission_callback' => array( $this, 'authenticate_request' ),
+				'args'                => array(
+					'calls' => array(
+						'type'     => 'array',
+						'required' => true,
+						'minItems' => 1,
+						'maxItems' => self::MAX_CALLS,
+						'items'    => array(
+							'type'       => 'object',
+							'required'   => array( 'name' ),
+							'properties' => array(
+								'name'      => array( 'type' => 'string' ),
+								'arguments' => array( 'type' => 'object' ),
+							),
+						),
+					),
+				),
+			)
+		);
 	}
 
 	/**
-	 * Register the briefing's MCP server: the read tools, no resources, no prompts.
+	 * Run each call in order and answer `{ results: [...] }`, one result per
+	 * call, so the Briefing app makes one request per batch.
 	 *
-	 * @param object $adapter The McpAdapter instance.
+	 * @param \WP_REST_Request $request The current REST request.
+	 * @return \WP_REST_Response
 	 */
-	public function register_mcp_server( $adapter ) {
-		if ( ! is_object( $adapter ) || ! method_exists( $adapter, 'create_server' ) || ! class_exists( '\\WP\\MCP\\Transport\\HttpTransport' ) ) {
-			return;
+	public function call( $request ) {
+		$results = array();
+		foreach ( (array) $request->get_param( 'calls' ) as $call ) {
+			$results[] = self::run_call( (array) $call );
+		}
+		return rest_ensure_response( array( 'results' => $results ) );
+	}
+
+	/**
+	 * Run one call: `{ ok: true, data }`, or `{ ok: false, code, error }`.
+	 *
+	 * Only the briefing's own tools run. `execute()` checks `manage_woocommerce`
+	 * and the input schema, as the MCP adapter did, and one failing call
+	 * doesn't stop the others.
+	 *
+	 * @param array $call `name` and optional `arguments`.
+	 * @return array
+	 */
+	public static function run_call( array $call ) {
+		$name    = self::ability_name( isset( $call['name'] ) ? (string) $call['name'] : '' );
+		$ability = $name && function_exists( 'wp_get_ability' ) ? wp_get_ability( $name ) : null;
+		if ( ! $ability ) {
+			return array(
+				'ok'    => false,
+				'code'  => 'unknown_tool',
+				'error' => __( 'Briefing for WooCommerce has no tool by that name.', 'briefing-for-woocommerce' ),
+			);
 		}
 
+		$arguments = isset( $call['arguments'] ) && is_array( $call['arguments'] ) ? $call['arguments'] : array();
 		try {
-			$adapter->create_server(
-				self::MCP_SERVER_ID,
-				self::MCP_SERVER_NS,
-				self::MCP_SERVER_ROUTE,
-				__( 'Briefing for WooCommerce', 'briefing-for-woocommerce' ),
-				'Read-only store totals for Briefing for WooCommerce\'s weekly briefing. Aggregates only: no orders, customers, names or emails.',
-				BRIEFING_FOR_WOOCOMMERCE_VERSION,
-				array( \WP\MCP\Transport\HttpTransport::class ),
-				\WP\MCP\Infrastructure\ErrorHandling\ErrorLogMcpErrorHandler::class,
-				\WP\MCP\Infrastructure\Observability\NullMcpObservabilityHandler::class,
-				Abilities::TOOLS,
-				array(),
-				array(),
-				array( $this, 'authenticate_mcp_request' )
-			);
+			$result = $ability->execute( $arguments );
 		} catch ( \Throwable $e ) {
 			if ( function_exists( 'wc_get_logger' ) ) {
 				wc_get_logger()->error(
-					'Briefing for WooCommerce MCP server initialisation failed: ' . $e->getMessage(),
+					'Briefing for WooCommerce call failed: ' . $name . ': ' . $e->getMessage(),
 					array( 'source' => 'briefing-for-woocommerce' )
 				);
 			}
+			return array(
+				'ok'    => false,
+				'code'  => 'tool_failed',
+				'error' => __( 'The tool failed.', 'briefing-for-woocommerce' ),
+			);
 		}
+
+		if ( is_wp_error( $result ) ) {
+			return array(
+				'ok'    => false,
+				'code'  => $result->get_error_code(),
+				'error' => $result->get_error_message(),
+			);
+		}
+		return array(
+			'ok'   => true,
+			'data' => Abilities::without_people( $result ),
+		);
 	}
 
 	/**
-	 * Authenticate an MCP request with a WooCommerce REST API key sent as HTTP
+	 * The ability a call names, or null if it isn't one of the briefing's
+	 * tools. The app sends the names the MCP server gave them
+	 * (`briefing-totals` for `briefing/totals`).
+	 *
+	 * @param string $name The name in the call.
+	 * @return string|null
+	 */
+	private static function ability_name( $name ) {
+		$ability = preg_replace( '/^briefing-/', 'briefing/', $name );
+		return in_array( $ability, Abilities::TOOLS, true ) ? $ability : null;
+	}
+
+	/**
+	 * Authenticate a request with a WooCommerce REST API key sent as HTTP
 	 * Basic auth (`ck_…` username, `cs_…` password).
 	 *
-	 * WooCommerce's own REST auth treats every POST as a write, and MCP posts
-	 * everything, so a read-only key would be refused. This checks the key
+	 * WooCommerce's own REST auth treats every POST as a write, and the route
+	 * is a POST, so a read-only key would be refused. This checks the key
 	 * directly instead: `read` and `read_write` keys pass, `write`-only keys
 	 * don't. Each ability still requires `manage_woocommerce` of the key's user.
 	 *
 	 * @param \WP_REST_Request $request The current REST request.
 	 * @return bool
 	 */
-	public function authenticate_mcp_request( $request ) {
+	public function authenticate_request( $request ) {
 		if ( ! ( $request instanceof \WP_REST_Request ) || ! function_exists( 'wc_api_hash' ) ) {
 			return false;
 		}
@@ -198,13 +263,13 @@ class Plugin {
 	}
 
 	/**
-	 * Don't run application-password auth on our MCP route (see the constructor).
+	 * Don't run application-password auth on our route (see the constructor).
 	 *
 	 * @param bool $is_api_request What WP would otherwise consider this request.
 	 * @return bool
 	 */
-	public function exclude_mcp_route_from_app_password_auth( $is_api_request ) {
-		if ( $is_api_request && 0 === strpos( self::current_rest_route(), self::MCP_SERVER_NS . '/' . self::MCP_SERVER_ROUTE ) ) {
+	public function exclude_route_from_app_password_auth( $is_api_request ) {
+		if ( $is_api_request && 0 === strpos( self::current_rest_route(), self::REST_NAMESPACE . '/' . self::REST_ROUTE ) ) {
 			return false;
 		}
 		return $is_api_request;

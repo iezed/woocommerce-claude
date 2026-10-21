@@ -59,7 +59,7 @@ claude mcp add woocommerce-claude \
   --env WP_API_URL=https://yourstore.com/wp-json/woocommerce-claude/mcp \
   --env WP_API_USERNAME=ck_xxx \
   --env WP_API_PASSWORD=cs_xxx \
-  -- npx -y @automattic/mcp-wordpress-remote@0.3.0
+  -- npx -y @automattic/mcp-wordpress-remote@0.5.4
 ```
 
 **Claude Desktop / Cursor / generic** — add to your MCP config manually:
@@ -69,7 +69,7 @@ claude mcp add woocommerce-claude \
   "mcpServers": {
     "woocommerce-claude": {
       "command": "npx",
-      "args": ["-y", "@automattic/mcp-wordpress-remote@0.3.0"],
+      "args": ["-y", "@automattic/mcp-wordpress-remote@0.5.4"],
       "env": {
         "WP_API_URL": "https://yourstore.com/wp-json/woocommerce-claude/mcp",
         "WP_API_USERNAME": "ck_xxx",

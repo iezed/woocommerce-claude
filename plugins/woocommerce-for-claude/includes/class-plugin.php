@@ -328,9 +328,9 @@ class Plugin {
 	 * the request's `MCP-Protocol-Version` header, when the adapter can
 	 * negotiate that version.
 	 *
-	 * The `@automattic/mcp-wordpress-remote` bridge up to 0.4.x — what our
-	 * generated Claude Desktop / Claude Code configs run, pinned in configs
-	 * merchants already have — sends `MCP-Protocol-Version: 2025-06-18` on
+	 * The `@automattic/mcp-wordpress-remote` bridge up to 0.4.x — pinned
+	 * (0.3.0) in every Claude Desktop / Claude Code config this plugin
+	 * generated before it moved to 0.5.x — sends `MCP-Protocol-Version: 2025-06-18` on
 	 * every request but forwards the Claude client's own `protocolVersion`
 	 * in `initialize`. MCP Adapter 0.7.0 negotiates that newer version
 	 * (or `2025-11-25` as its fallback) and then rejects every following
@@ -448,9 +448,16 @@ class Plugin {
 	 *               ship one in `vendor/wordpress/mcp-adapter`). Works today,
 	 *               but WooCommerce 11.3 removes it and adapter 0.7.0
 	 *               deprecates library loading.
-	 * - `missing` — no adapter, so `/wp-json/woocommerce-claude/mcp` is not
-	 *               registered. The default on WooCommerce 11.3+ until the
-	 *               merchant installs MCP Adapter.
+	 * - `missing` — no usable adapter, so `/wp-json/woocommerce-claude/mcp`
+	 *               is not registered. The default on WooCommerce 11.3+
+	 *               until the merchant installs and activates MCP Adapter.
+	 *
+	 * The adapter classes can resolve even when the MCP Adapter plugin is
+	 * inactive: WooCommerce's autoloader caches plugin paths, so right after
+	 * the plugin is deactivated `class_exists()` may still load it from its
+	 * directory. A copy loaded from the plugin's own directory without the
+	 * plugin having run is never a bundled copy, so that counts as `missing`
+	 * rather than something to boot.
 	 *
 	 * Reliable from `plugins_loaded` onwards.
 	 *
@@ -461,25 +468,51 @@ class Plugin {
 			return 'plugin';
 		}
 
-		if ( class_exists( '\\WP\\MCP\\Core\\McpAdapter' ) ) {
-			return 'bundled';
+		if ( ! class_exists( '\\WP\\MCP\\Core\\McpAdapter' ) ) {
+			return 'missing';
 		}
 
-		return 'missing';
+		$class_file = ( new \ReflectionClass( '\\WP\\MCP\\Core\\McpAdapter' ) )->getFileName();
+		if ( is_string( $class_file ) && self::is_adapter_plugin_file( $class_file ) ) {
+			return 'missing';
+		}
+
+		return 'bundled';
+	}
+
+	/**
+	 * Whether a file lives inside the MCP Adapter plugin's directory.
+	 *
+	 * Compares resolved paths, because PHP reports class files with
+	 * symlinks resolved while WP_PLUGIN_DIR may contain one.
+	 *
+	 * @param string $file Absolute file path.
+	 * @return bool
+	 */
+	public static function is_adapter_plugin_file( $file ) {
+		$plugin_dir = trailingslashit( WP_PLUGIN_DIR ) . dirname( self::MCP_ADAPTER_PLUGIN_FILE );
+		$resolved   = realpath( $plugin_dir );
+		$plugin_dir = trailingslashit( wp_normalize_path( false !== $resolved ? $resolved : $plugin_dir ) );
+
+		$resolved_file = realpath( $file );
+		$file          = wp_normalize_path( false !== $resolved_file ? $resolved_file : $file );
+
+		return 0 === strpos( $file, $plugin_dir );
 	}
 
 	/**
 	 * Boot the WordPress MCP adapter ahead of `rest_api_init` so our server
 	 * can register on `mcp_adapter_init`.
 	 *
-	 * Only does anything when the adapter is a bundled library inside
-	 * WooCommerce 10.x–11.2, which WC itself only boots behind its
-	 * `mcp_integration` feature flag. `McpAdapter::instance()` is
-	 * idempotent — when the MCP Adapter plugin (or WC) has already booted
-	 * it, this is a no-op.
+	 * Only boots a bundled library inside WooCommerce 10.x–11.2, which WC
+	 * itself only boots behind its `mcp_integration` feature flag. The MCP
+	 * Adapter plugin boots itself, and a copy resolved from an inactive
+	 * plugin's directory must not be booted (see mcp_adapter_source()).
+	 * `McpAdapter::instance()` is idempotent, so WC having booted it
+	 * already is fine.
 	 */
 	public function bootstrap_mcp_adapter() {
-		if ( class_exists( '\\WP\\MCP\\Core\\McpAdapter' ) ) {
+		if ( 'bundled' === self::mcp_adapter_source() ) {
 			\WP\MCP\Core\McpAdapter::instance();
 		}
 	}
@@ -487,18 +520,28 @@ class Plugin {
 	/**
 	 * Filter `mcp_adapter_create_default_server`.
 	 *
-	 * When the merchant runs the canonical MCP Adapter plugin, its default
-	 * server at `/wp-json/mcp/mcp-adapter-default-server` is the endpoint
-	 * WooCommerce 11.3 points them at for core product/order abilities, so
-	 * we leave the decision alone. None of our abilities are `mcp.public`,
-	 * so the default server's discover/execute tools don't reach our
-	 * surface, and our WC REST key auth is scoped to our own routes.
+	 * With the canonical MCP Adapter plugin active we leave the decision
+	 * alone, even though our `Requires Plugins: mcp-adapter` is often why
+	 * the plugin is installed. The trade-off is deliberate:
 	 *
-	 * When we're the ones booting a bundled library copy, the merchant
-	 * never opted into a default server, so we keep suppressing it: it
-	 * authenticates with the adapter's `current_user_can('read')` default
-	 * rather than our `authenticate_mcp_request`, and would otherwise
-	 * appear purely as a side effect of installing this plugin.
+	 * - WooCommerce 11.3 sends merchants to that server
+	 *   (`/wp-json/mcp/mcp-adapter-default-server`) for core product and
+	 *   order abilities. Suppressing it from here would break their
+	 *   WooCommerce MCP connection whenever this plugin is active.
+	 * - It is the adapter plugin's own default, so a store gets it from
+	 *   any plugin that requires the adapter, not just this one.
+	 * - It is reachable by any logged-in user with `read` (the adapter's
+	 *   default), but it only exposes abilities marked `mcp.public`, and
+	 *   each still runs its own permission check. None of ours are
+	 *   `mcp.public`, and our WC REST key auth is scoped to our own routes,
+	 *   so it doesn't reach our surface or accept our connection key.
+	 *
+	 * Merchants who don't want it can turn it off with the adapter's own
+	 * `mcp_adapter_create_default_server` filter; we pass that through.
+	 *
+	 * When we're the ones booting a bundled library copy (WooCommerce
+	 * 10.x–11.2 without the plugin), nobody installed the adapter for its
+	 * default server, so we keep suppressing it.
 	 *
 	 * @param bool $create Whether to create the default server.
 	 * @return bool

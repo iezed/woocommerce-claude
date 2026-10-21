@@ -38,8 +38,13 @@ class SetupPage {
 	 * snippets so a merchant who installed today still runs the same
 	 * proxy in 12 months. Bump on each plugin release after vetting
 	 * the upstream changelog.
+	 *
+	 * 0.5.x is the first line that sends the negotiated
+	 * `MCP-Protocol-Version`, which MCP Adapter 0.7.0 enforces. Configs
+	 * generated with 0.3.0 still work through
+	 * Plugin::align_initialize_protocol_version().
 	 */
-	const REMOTE_PACKAGE = '@automattic/mcp-wordpress-remote@0.3.0';
+	const REMOTE_PACKAGE = '@automattic/mcp-wordpress-remote@0.5.4';
 
 	/**
 	 * WC settings tab id this page lives under.
@@ -200,10 +205,11 @@ class SetupPage {
 	 * `/wp-json/woocommerce-claude/mcp` endpoint only exists while the MCP
 	 * Adapter plugin is active. Returns null when it is.
 	 *
+	 * @param string|null $source Adapter source as Plugin::mcp_adapter_source() reports it; detected when null.
 	 * @return array{kind:string,title:string,body:string,action_url:string,action_label:string}|null
 	 */
-	public static function mcp_adapter_notice() {
-		$source = Plugin::mcp_adapter_source();
+	public static function mcp_adapter_notice( $source = null ) {
+		$source = null === $source ? Plugin::mcp_adapter_source() : $source;
 		if ( 'plugin' === $source ) {
 			return null;
 		}

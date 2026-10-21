@@ -319,18 +319,18 @@ class Test_WC_Auth_Route_Scoping extends WP_UnitTestCase {
 	}
 
 	/**
-	 * With a bundled adapter copy (WooCommerce 10.x–11.2), the plugin
-	 * must suppress the adapter's auto-created default server. That
-	 * endpoint at `/wp-json/mcp/mcp-adapter-default-server` uses the
-	 * adapter's default `current_user_can('read')` permission instead
-	 * of our `authenticate_mcp_request` callback, and the merchant
-	 * never opted into it — it would appear purely because this plugin
-	 * booted the bundled library.
+	 * Without the MCP Adapter plugin running, the plugin must suppress the
+	 * adapter's auto-created default server. That endpoint at
+	 * `/wp-json/mcp/mcp-adapter-default-server` uses the adapter's default
+	 * `current_user_can('read')` permission instead of our
+	 * `authenticate_mcp_request` callback, and nobody installed the adapter
+	 * for it — on WooCommerce 10.x–11.2 it would appear purely because this
+	 * plugin booted the bundled library.
 	 *
-	 * Simulates the bundled case by hiding the `wp_mcp_init` action the
-	 * MCP Adapter plugin's main file fires.
+	 * Simulated by hiding the `wp_mcp_init` action the MCP Adapter plugin's
+	 * main file fires (the classes then count as an inactive plugin's copy).
 	 */
-	public function test_default_mcp_adapter_server_is_suppressed_for_bundled_adapter() {
+	public function test_default_mcp_adapter_server_is_suppressed_without_adapter_plugin() {
 		\WooCommerce\Claude\Plugin::instance();
 
 		global $wp_actions;
@@ -338,7 +338,7 @@ class Test_WC_Auth_Route_Scoping extends WP_UnitTestCase {
 		unset( $wp_actions['wp_mcp_init'] );
 
 		try {
-			$this->assertSame( 'bundled', \WooCommerce\Claude\Plugin::mcp_adapter_source() );
+			$this->assertNotSame( 'plugin', \WooCommerce\Claude\Plugin::mcp_adapter_source() );
 
 			// phpcs:ignore WooCommerce.Commenting.CommentHooks.MissingHookComment -- synthetic application of an upstream filter for assertion only; not a hook definition.
 			$result = apply_filters( 'mcp_adapter_create_default_server', true );
@@ -350,7 +350,7 @@ class Test_WC_Auth_Route_Scoping extends WP_UnitTestCase {
 
 		$this->assertFalse(
 			$result,
-			'mcp_adapter_create_default_server must resolve to false when we booted a bundled adapter copy.'
+			'mcp_adapter_create_default_server must resolve to false unless the MCP Adapter plugin is running.'
 		);
 	}
 

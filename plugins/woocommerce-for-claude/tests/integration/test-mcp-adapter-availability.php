@@ -7,9 +7,10 @@
  * Adapter plugin is active. These tests pin how the plugin tells the
  * three cases apart and what the merchant is shown for each.
  *
- * The "missing" case can't be simulated in-process (the adapter classes
- * are already loaded), so it is covered by manual testing against
- * WooCommerce 11.3 without the adapter plugin.
+ * The fully "missing" case (no adapter classes at all) can't be simulated
+ * in-process, because the adapter classes are already loaded; it is
+ * covered by manual testing against WooCommerce 11.3 without the plugin.
+ * The "bundled" notice is exercised by passing the source explicitly.
  *
  * @package WooCommerce\Claude\Tests
  */
@@ -50,10 +51,12 @@ class Test_MCP_Adapter_Availability extends WP_UnitTestCase {
 	}
 
 	/**
-	 * Make the adapter look like WooCommerce's bundled library copy: the
-	 * classes exist, but the plugin's main file never fired `wp_mcp_init`.
+	 * Make the MCP Adapter plugin look inactive: its classes still resolve
+	 * from its directory (as WooCommerce's autoloader cache can make them
+	 * do right after deactivation), but its main file never fired
+	 * `wp_mcp_init`.
 	 */
-	private function simulate_bundled_adapter() {
+	private function simulate_inactive_adapter_plugin() {
 		global $wp_actions;
 		unset( $wp_actions['wp_mcp_init'] );
 	}
@@ -76,16 +79,31 @@ class Test_MCP_Adapter_Availability extends WP_UnitTestCase {
 	}
 
 	/**
-	 * A bundled copy still works today, so the notice is a warning ahead
-	 * of the WooCommerce 11.3 update rather than an error.
+	 * Classes resolved from an inactive MCP Adapter plugin's directory are
+	 * not a bundled copy: nothing must boot them, and the merchant is told
+	 * the adapter is missing.
 	 */
-	public function test_bundled_adapter_shows_upgrade_warning() {
-		$this->simulate_bundled_adapter();
+	public function test_inactive_adapter_plugin_copy_counts_as_missing() {
+		$this->simulate_inactive_adapter_plugin();
 		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
 
-		$this->assertSame( 'bundled', Plugin::mcp_adapter_source() );
+		$this->assertSame( 'missing', Plugin::mcp_adapter_source() );
 
 		$notice = SetupPage::mcp_adapter_notice();
+
+		$this->assertIsArray( $notice );
+		$this->assertSame( 'error', $notice['kind'] );
+	}
+
+	/**
+	 * A bundled copy (WooCommerce 10.x–11.2) still works today, so the
+	 * notice is a warning ahead of the WooCommerce 11.3 update rather than
+	 * an error.
+	 */
+	public function test_bundled_adapter_shows_upgrade_warning() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+
+		$notice = SetupPage::mcp_adapter_notice( 'bundled' );
 
 		$this->assertIsArray( $notice );
 		$this->assertSame( 'warning', $notice['kind'] );
@@ -93,11 +111,23 @@ class Test_MCP_Adapter_Availability extends WP_UnitTestCase {
 	}
 
 	/**
+	 * Only files inside the MCP Adapter plugin's directory count as the
+	 * plugin's copy; WooCommerce's bundled library lives elsewhere.
+	 */
+	public function test_adapter_plugin_file_detection() {
+		$plugin_dir = trailingslashit( WP_PLUGIN_DIR );
+
+		$this->assertTrue( Plugin::is_adapter_plugin_file( $plugin_dir . 'mcp-adapter/includes/Core/McpAdapter.php' ) );
+		$this->assertFalse( Plugin::is_adapter_plugin_file( $plugin_dir . 'woocommerce/vendor/wordpress/mcp-adapter/includes/Core/McpAdapter.php' ) );
+		$this->assertFalse( Plugin::is_adapter_plugin_file( $plugin_dir . 'mcp-adapter-fork/includes/Core/McpAdapter.php' ), 'A sibling directory sharing the prefix is not the plugin.' );
+	}
+
+	/**
 	 * An administrator gets a one-click install or activate link, with
 	 * the core plugin-action nonce.
 	 */
 	public function test_administrator_gets_plugin_action_link() {
-		$this->simulate_bundled_adapter();
+		$this->simulate_inactive_adapter_plugin();
 		$admin_id = self::factory()->user->create( array( 'role' => 'administrator' ) );
 		if ( is_multisite() ) {
 			grant_super_admin( $admin_id );
@@ -124,7 +154,7 @@ class Test_MCP_Adapter_Availability extends WP_UnitTestCase {
 	 * link that would fail.
 	 */
 	public function test_shop_manager_is_pointed_at_an_administrator() {
-		$this->simulate_bundled_adapter();
+		$this->simulate_inactive_adapter_plugin();
 		wp_set_current_user( self::factory()->user->create( array( 'role' => 'shop_manager' ) ) );
 
 		$notice = SetupPage::mcp_adapter_notice();

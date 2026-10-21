@@ -3,7 +3,7 @@
  * Plugin Name: WooCommerce for Claude
  * Plugin URI: https://woocommerce.com/
  * Description: Makes any WooCommerce store AI-operable — structured knowledge API, readiness scoring, and developer hooks for AI agents.
- * Version: 0.4.5
+ * Version: 0.5.0
  * Author: Automattic
  * Author URI: https://automattic.com/
  * Text Domain: woocommerce-claude
@@ -12,7 +12,7 @@
  * Requires PHP: 7.4
  * WC requires at least: 10.6
  * WC tested up to: 10.7
- * Requires Plugins: woocommerce
+ * Requires Plugins: woocommerce, mcp-adapter
  * License: GPL-3.0-or-later
  * License URI: https://www.gnu.org/licenses/gpl-3.0.html
  *
@@ -21,7 +21,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'WOOCOMMERCE_CLAUDE_VERSION', '0.4.5' );
+define( 'WOOCOMMERCE_CLAUDE_VERSION', '0.5.0' );
 define( 'WOOCOMMERCE_CLAUDE_PLUGIN_FILE', __FILE__ );
 define( 'WOOCOMMERCE_CLAUDE_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 

@@ -64,8 +64,8 @@ class Test_MCP_Server_Registration extends WP_UnitTestCase {
 	public function test_woocommerce_claude_server_exposes_expected_tools() {
 		$server     = \WP\MCP\Core\McpAdapter::instance()->get_server( 'woocommerce-claude' );
 		$tool_names = array();
-		foreach ( $server->get_tools() as $tool ) {
-			$tool_names[] = $tool->get_name();
+		foreach ( woocommerce_claude_tests_mcp_components( $server, 'tools' ) as $tool ) {
+			$tool_names[] = $tool['name'];
 		}
 
 		// Tool names are the ability ID with `/` replaced by `-` (the
@@ -102,7 +102,7 @@ class Test_MCP_Server_Registration extends WP_UnitTestCase {
 	 */
 	public function test_woocommerce_claude_server_exposes_expected_resources() {
 		$server         = \WP\MCP\Core\McpAdapter::instance()->get_server( 'woocommerce-claude' );
-		$resources      = $server->get_resources();
+		$resources      = woocommerce_claude_tests_mcp_components( $server, 'resources' );
 		$resource_count = count( $resources );
 
 		$this->assertSame(
@@ -117,11 +117,11 @@ class Test_MCP_Server_Registration extends WP_UnitTestCase {
 	 */
 	public function test_woocommerce_claude_server_exposes_expected_prompts() {
 		$server  = \WP\MCP\Core\McpAdapter::instance()->get_server( 'woocommerce-claude' );
-		$prompts = $server->get_prompts();
+		$prompts = woocommerce_claude_tests_mcp_components( $server, 'prompts' );
 
 		$prompt_names = array();
 		foreach ( $prompts as $prompt ) {
-			$prompt_names[] = $prompt->get_name();
+			$prompt_names[] = $prompt['name'];
 		}
 
 		$this->assertContains( 'wc-prompts-catalog-audit', $prompt_names );

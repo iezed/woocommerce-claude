@@ -132,13 +132,18 @@ CREDENTIAL="$(
 	' | tail -n 1
 )"
 
+# Mirror what the pinned @automattic/mcp-wordpress-remote bridge sends: the
+# Claude client's newer protocolVersion in initialize, and a fixed
+# `MCP-Protocol-Version: 2025-06-18` header on every request. MCP Adapter
+# 0.7.0 only accepts that via Plugin::align_initialize_protocol_version().
 curl -sS \
 	-D "$HEADERS_FILE" \
 	-o "$INIT_FILE" \
 	-u "$CREDENTIAL" \
 	-H "Content-Type: application/json" \
 	-H "Accept: application/json, text/event-stream" \
-	-d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"woocommerce-claude-upgrade-smoke","version":"0"}}}' \
+	-H "MCP-Protocol-Version: 2025-06-18" \
+	-d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"woocommerce-claude-upgrade-smoke","version":"0"}}}' \
 	"$MCP_URL" >/dev/null
 
 SESSION_ID="$(
@@ -159,6 +164,7 @@ curl -sS \
 	-u "$CREDENTIAL" \
 	-H "Content-Type: application/json" \
 	-H "Accept: application/json, text/event-stream" \
+	-H "MCP-Protocol-Version: 2025-06-18" \
 	-H "Mcp-Session-Id: $SESSION_ID" \
 	-d '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
 	"$MCP_URL" >/dev/null
@@ -168,6 +174,7 @@ curl -sS \
 	-u "$CREDENTIAL" \
 	-H "Content-Type: application/json" \
 	-H "Accept: application/json, text/event-stream" \
+	-H "MCP-Protocol-Version: 2025-06-18" \
 	-H "Mcp-Session-Id: $SESSION_ID" \
 	-d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
 	"$MCP_URL" >/dev/null

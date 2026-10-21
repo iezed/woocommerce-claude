@@ -319,31 +319,55 @@ class Test_WC_Auth_Route_Scoping extends WP_UnitTestCase {
 	}
 
 	/**
-	 * The plugin must suppress the WP MCP adapter's auto-created
-	 * default server. That endpoint at
-	 * `/wp-json/mcp/mcp-adapter-default-server` uses the adapter's
-	 * default `current_user_can('read')` permission instead of our
-	 * `authenticate_mcp_request` callback, so leaving it on would
-	 * expose a second, non-curated MCP surface — including any
-	 * abilities a third-party plugin marks as `mcp.public`. The setup
-	 * flow only scopes access to `/wp-json/woocommerce-claude/mcp`, so the
-	 * default endpoint is an unsupervised parallel surface.
+	 * Without the MCP Adapter plugin running, the plugin must suppress the
+	 * adapter's auto-created default server. That endpoint at
+	 * `/wp-json/mcp/mcp-adapter-default-server` uses the adapter's default
+	 * `current_user_can('read')` permission instead of our
+	 * `authenticate_mcp_request` callback, and nobody installed the adapter
+	 * for it — on WooCommerce 10.x–11.2 it would appear purely because this
+	 * plugin booted the bundled library.
 	 *
-	 * Pin the filter contract: after Plugin::instance() runs,
-	 * `mcp_adapter_create_default_server` resolves to false regardless
-	 * of the incoming value. If a future refactor drops the filter
-	 * registration, this test fails loud.
+	 * Simulated by hiding the `wp_mcp_init` action the MCP Adapter plugin's
+	 * main file fires (the classes then count as an inactive plugin's copy).
 	 */
-	public function test_default_mcp_adapter_server_is_suppressed() {
-		// Trigger plugin bootstrap if it hasn't already happened in this test run.
+	public function test_default_mcp_adapter_server_is_suppressed_without_adapter_plugin() {
 		\WooCommerce\Claude\Plugin::instance();
 
-		// phpcs:ignore WooCommerce.Commenting.CommentHooks.MissingHookComment -- synthetic application of an upstream filter for assertion only; not a hook definition.
-		$result = apply_filters( 'mcp_adapter_create_default_server', true );
+		global $wp_actions;
+		$saved = $wp_actions['wp_mcp_init'] ?? null;
+		unset( $wp_actions['wp_mcp_init'] );
+
+		try {
+			$this->assertNotSame( 'plugin', \WooCommerce\Claude\Plugin::mcp_adapter_source() );
+
+			// phpcs:ignore WooCommerce.Commenting.CommentHooks.MissingHookComment -- synthetic application of an upstream filter for assertion only; not a hook definition.
+			$result = apply_filters( 'mcp_adapter_create_default_server', true );
+		} finally {
+			if ( null !== $saved ) {
+				$wp_actions['wp_mcp_init'] = $saved; // phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited -- restoring the snapshot taken above.
+			}
+		}
 
 		$this->assertFalse(
 			$result,
-			'mcp_adapter_create_default_server must resolve to false so the default endpoint is not registered.'
+			'mcp_adapter_create_default_server must resolve to false unless the MCP Adapter plugin is running.'
 		);
+	}
+
+	/**
+	 * With the canonical MCP Adapter plugin active (required from
+	 * WooCommerce 11.3), the default server is the endpoint WooCommerce
+	 * points merchants at for core product/order abilities, so the
+	 * plugin must leave the decision alone rather than break it.
+	 */
+	public function test_default_mcp_adapter_server_is_left_alone_with_adapter_plugin() {
+		\WooCommerce\Claude\Plugin::instance();
+
+		$this->assertSame( 'plugin', \WooCommerce\Claude\Plugin::mcp_adapter_source(), 'Tests expect the MCP Adapter plugin to be loaded (see tests/integration/bootstrap.php).' );
+
+		// phpcs:ignore WooCommerce.Commenting.CommentHooks.MissingHookComment -- synthetic application of an upstream filter for assertion only; not a hook definition.
+		$this->assertTrue( apply_filters( 'mcp_adapter_create_default_server', true ) );
+		// phpcs:ignore WooCommerce.Commenting.CommentHooks.MissingHookComment -- synthetic application of an upstream filter for assertion only; not a hook definition.
+		$this->assertFalse( apply_filters( 'mcp_adapter_create_default_server', false ), 'A merchant or plugin that turned the default server off must stay in control.' );
 	}
 }

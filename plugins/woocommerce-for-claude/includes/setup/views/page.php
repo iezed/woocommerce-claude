@@ -20,6 +20,7 @@
  * SetupPage::render_setup_view()):
  *
  * @var bool                                                                $site_https   Whether home_url() is https.
+ * @var array{kind:string,title:string,body:string,action_url:string,action_label:string}|null $mcp_notice MCP Adapter availability notice, or null when the plugin is active.
  * @var string                                                              $endpoint_url Full WooCommerce for Claude MCP endpoint URL.
  * @var string                                                              $notice_code  Status flash from query string.
  * @var array{credential:string,key_id:int,permissions:string}|null         $key_state    Provisioned key, or null if not yet created.
@@ -118,6 +119,27 @@ $is_embedded           = isset( $is_embedded ) ? (bool) $is_embedded : false;
 			</span>
 			<div class="woocommerce-claude-setup__banner-body">
 				<p><?php echo esc_html( $notice_text ); ?></p>
+			</div>
+		</div>
+	<?php endif; ?>
+
+	<?php if ( is_array( $mcp_notice ) ) : ?>
+		<div class="woocommerce-claude-setup__banner woocommerce-claude-setup__banner--<?php echo esc_attr( $mcp_notice['kind'] ); ?>" role="<?php echo esc_attr( 'error' === $mcp_notice['kind'] ? 'alert' : 'status' ); ?>">
+			<span class="woocommerce-claude-setup__banner-icon" aria-hidden="true">
+				<svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+					<circle cx="10" cy="10" r="8.25" stroke="currentColor" stroke-width="1.5"/>
+					<path d="M10 9V14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+					<circle cx="10" cy="6.25" r="0.95" fill="currentColor"/>
+				</svg>
+			</span>
+			<div class="woocommerce-claude-setup__banner-body">
+				<strong><?php echo esc_html( $mcp_notice['title'] ); ?></strong>
+				<p><?php echo esc_html( $mcp_notice['body'] ); ?></p>
+				<?php if ( '' !== $mcp_notice['action_url'] ) : ?>
+					<p class="woocommerce-claude-setup__banner-actions">
+						<a class="button button-primary" href="<?php echo esc_url( $mcp_notice['action_url'] ); ?>"><?php echo esc_html( $mcp_notice['action_label'] ); ?></a>
+					</p>
+				<?php endif; ?>
 			</div>
 		</div>
 	<?php endif; ?>

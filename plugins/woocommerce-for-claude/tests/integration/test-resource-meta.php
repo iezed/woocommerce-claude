@@ -74,8 +74,8 @@ class Test_Resource_Meta extends WP_UnitTestCase {
 		rest_get_server();
 		$server = \WP\MCP\Core\McpAdapter::instance()->get_server( 'woocommerce-claude' );
 		$uris   = array();
-		foreach ( $server->get_resources() as $resource ) {
-			$uris[] = $resource->get_uri();
+		foreach ( woocommerce_claude_tests_mcp_components( $server, 'resources' ) as $resource ) {
+			$uris[] = $resource['uri'];
 		}
 		sort( $uris );
 

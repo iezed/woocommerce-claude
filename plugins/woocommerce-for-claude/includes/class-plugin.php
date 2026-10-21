@@ -157,21 +157,17 @@ class Plugin {
 		// WC's auth handler only processes requests to /wc/ routes by default.
 		add_filter( 'woocommerce_rest_is_request_to_rest_api', array( $this, 'enable_wc_auth_for_our_routes' ), 10 );
 
-		// Boot the MCP adapter ourselves so the WooCommerce for Claude MCP endpoint works
-		// independently of WC's `mcp_integration` feature flag. The adapter
-		// is a singleton — calling instance() repeatedly is a no-op, so this
-		// is safe even if WC's MCPAdapterProvider also boots it.
+		// Boot the MCP adapter on WooCommerce versions that still bundle it
+		// as a library (10.x–11.2), where WC only boots it behind its
+		// `mcp_integration` feature flag. With the canonical MCP Adapter
+		// plugin active (required from WooCommerce 11.3) the plugin has
+		// already booted it and this is a no-op.
 		add_action( 'plugins_loaded', array( $this, 'bootstrap_mcp_adapter' ), 20 );
 
-		// Suppress the adapter's auto-created default server at
-		// `/wp-json/mcp/mcp-adapter-default-server`. That endpoint uses the
-		// adapter's default `current_user_can('read')` permission instead
-		// of our `authenticate_mcp_request` callback, so leaving it on
-		// would expose a second, non-curated MCP surface — including any
-		// abilities a third-party plugin marks as `mcp.public`. The setup
-		// flow scopes access to `/wp-json/woocommerce-claude/mcp` only, and our
-		// curated server already covers the surface we want to expose.
-		add_filter( 'mcp_adapter_create_default_server', '__return_false' );
+		// Decide whether the adapter's default server at
+		// `/wp-json/mcp/mcp-adapter-default-server` is created. See
+		// filter_default_mcp_server() for when we suppress it.
+		add_filter( 'mcp_adapter_create_default_server', array( $this, 'filter_default_mcp_server' ) );
 
 		// Register our own MCP server when the adapter initializes. Owns the
 		// `/wp-json/woocommerce-claude/mcp` endpoint with a curated tool/resource/prompt
@@ -192,6 +188,10 @@ class Plugin {
 		// error global, no 401 — so our own callback can authenticate
 		// the WC API key cleanly.
 		add_filter( 'application_password_is_api_request', array( $this, 'exclude_mcp_route_from_app_password_auth' ) );
+
+		// Negotiate the protocol version the client's transport header says
+		// it will use. See align_initialize_protocol_version().
+		add_filter( 'rest_pre_dispatch', array( $this, 'align_initialize_protocol_version' ), 10, 3 );
 	}
 
 	/**
@@ -324,6 +324,66 @@ class Plugin {
 	}
 
 	/**
+	 * Make `initialize` on our MCP route negotiate the protocol version in
+	 * the request's `MCP-Protocol-Version` header, when the adapter can
+	 * negotiate that version.
+	 *
+	 * The `@automattic/mcp-wordpress-remote` bridge up to 0.4.x — pinned
+	 * (0.3.0) in every Claude Desktop / Claude Code config this plugin
+	 * generated before it moved to 0.5.x — sends `MCP-Protocol-Version: 2025-06-18` on
+	 * every request but forwards the Claude client's own `protocolVersion`
+	 * in `initialize`. MCP Adapter 0.7.0 negotiates that newer version
+	 * (or `2025-11-25` as its fallback) and then rejects every following
+	 * request because the header doesn't match, so `tools/list` fails and
+	 * Claude sees no tools. Negotiating the header's version keeps the
+	 * session consistent; the bridge passes the negotiated version back to
+	 * Claude, which supports it.
+	 *
+	 * Spec-following clients don't send the header on `initialize`, so
+	 * this only changes requests that already declared their version.
+	 *
+	 * @param mixed            $result  Response to short-circuit with, or null.
+	 * @param \WP_REST_Server  $server  REST server instance.
+	 * @param \WP_REST_Request $request The request; its body is rewritten in place.
+	 * @return mixed `$result`, unchanged.
+	 */
+	public function align_initialize_protocol_version( $result, $server, $request ) {
+		if ( null !== $result || ! $request instanceof \WP_REST_Request || 'POST' !== $request->get_method() ) {
+			return $result;
+		}
+
+		$route = ltrim( (string) $request->get_route(), '/' );
+		if ( self::MCP_SERVER_NS . '/' . self::MCP_SERVER_ROUTE !== $route ) {
+			return $result;
+		}
+
+		$header_version = $request->get_header( 'mcp_protocol_version' );
+		if ( ! is_string( $header_version ) || '' === $header_version ) {
+			return $result;
+		}
+
+		if ( ! is_callable( array( '\\WP\\MCP\\Core\\McpVersionNegotiator', 'is_negotiable' ) )
+			|| ! \WP\MCP\Core\McpVersionNegotiator::is_negotiable( $header_version ) ) {
+			return $result;
+		}
+
+		$message = json_decode( (string) $request->get_body() );
+		if ( ! $message instanceof \stdClass
+			|| 'initialize' !== ( $message->method ?? null )
+			|| ! isset( $message->params )
+			|| ! $message->params instanceof \stdClass
+			|| ! is_string( $message->params->protocolVersion ?? null ) // phpcs:ignore WordPress.NamingConventions.ValidVariableName.UsedPropertyNotSnakeCase -- MCP wire field.
+			|| $header_version === $message->params->protocolVersion ) { // phpcs:ignore WordPress.NamingConventions.ValidVariableName.UsedPropertyNotSnakeCase -- MCP wire field.
+			return $result;
+		}
+
+		$message->params->protocolVersion = $header_version; // phpcs:ignore WordPress.NamingConventions.ValidVariableName.UsedPropertyNotSnakeCase -- MCP wire field.
+		$request->set_body( (string) wp_json_encode( $message ) );
+
+		return $result;
+	}
+
+	/**
 	 * Resolve the REST route the current request targets, regardless of
 	 * whether the install uses pretty (/wp-json/<route>) or plain
 	 * (?rest_route=/<route>) permalinks.
@@ -374,19 +434,124 @@ class Plugin {
 	const MCP_SERVER_ROUTE = 'mcp';
 
 	/**
+	 * WordPress.org slug and plugin file of the canonical MCP Adapter plugin.
+	 */
+	const MCP_ADAPTER_PLUGIN_SLUG = 'mcp-adapter';
+	const MCP_ADAPTER_PLUGIN_FILE = 'mcp-adapter/mcp-adapter.php';
+
+	/**
+	 * Where the WordPress MCP adapter is coming from on this request.
+	 *
+	 * - `plugin`  — the canonical MCP Adapter plugin is active. Its main
+	 *               file fires `wp_mcp_init`; a bundled library copy never does.
+	 * - `bundled` — only a library copy is loaded (WooCommerce 10.x–11.2
+	 *               ship one in `vendor/wordpress/mcp-adapter`). Works today,
+	 *               but WooCommerce 11.3 removes it and adapter 0.7.0
+	 *               deprecates library loading.
+	 * - `missing` — no usable adapter, so `/wp-json/woocommerce-claude/mcp`
+	 *               is not registered. The default on WooCommerce 11.3+
+	 *               until the merchant installs and activates MCP Adapter.
+	 *
+	 * The adapter classes can resolve even when the MCP Adapter plugin is
+	 * inactive: WooCommerce's autoloader caches plugin paths, so right after
+	 * the plugin is deactivated `class_exists()` may still load it from its
+	 * directory. A copy loaded from the plugin's own directory without the
+	 * plugin having run is never a bundled copy, so that counts as `missing`
+	 * rather than something to boot.
+	 *
+	 * Reliable from `plugins_loaded` onwards.
+	 *
+	 * @return string One of `plugin`, `bundled`, `missing`.
+	 */
+	public static function mcp_adapter_source() {
+		if ( did_action( 'wp_mcp_init' ) ) {
+			return 'plugin';
+		}
+
+		if ( ! class_exists( '\\WP\\MCP\\Core\\McpAdapter' ) ) {
+			return 'missing';
+		}
+
+		$class_file = ( new \ReflectionClass( '\\WP\\MCP\\Core\\McpAdapter' ) )->getFileName();
+		if ( is_string( $class_file ) && self::is_adapter_plugin_file( $class_file ) ) {
+			return 'missing';
+		}
+
+		return 'bundled';
+	}
+
+	/**
+	 * Whether a file lives inside the MCP Adapter plugin's directory.
+	 *
+	 * Compares resolved paths, because PHP reports class files with
+	 * symlinks resolved while WP_PLUGIN_DIR may contain one.
+	 *
+	 * @param string $file Absolute file path.
+	 * @return bool
+	 */
+	public static function is_adapter_plugin_file( $file ) {
+		$plugin_dir = trailingslashit( WP_PLUGIN_DIR ) . dirname( self::MCP_ADAPTER_PLUGIN_FILE );
+		$resolved   = realpath( $plugin_dir );
+		$plugin_dir = trailingslashit( wp_normalize_path( false !== $resolved ? $resolved : $plugin_dir ) );
+
+		$resolved_file = realpath( $file );
+		$file          = wp_normalize_path( false !== $resolved_file ? $resolved_file : $file );
+
+		return 0 === strpos( $file, $plugin_dir );
+	}
+
+	/**
 	 * Boot the WordPress MCP adapter ahead of `rest_api_init` so our server
 	 * can register on `mcp_adapter_init`.
 	 *
-	 * The adapter is a vendored library inside WooCommerce
-	 * (`vendor/wordpress/mcp-adapter`); WC only initializes it when its
-	 * `mcp_integration` feature flag is on. We boot it ourselves so the Hey
-	 * Woo endpoint works without that toggle. `McpAdapter::instance()` is
-	 * idempotent — if WC has already booted it, this is a no-op.
+	 * Only boots a bundled library inside WooCommerce 10.x–11.2, which WC
+	 * itself only boots behind its `mcp_integration` feature flag. The MCP
+	 * Adapter plugin boots itself, and a copy resolved from an inactive
+	 * plugin's directory must not be booted (see mcp_adapter_source()).
+	 * `McpAdapter::instance()` is idempotent, so WC having booted it
+	 * already is fine.
 	 */
 	public function bootstrap_mcp_adapter() {
-		if ( class_exists( '\\WP\\MCP\\Core\\McpAdapter' ) ) {
+		if ( 'bundled' === self::mcp_adapter_source() ) {
 			\WP\MCP\Core\McpAdapter::instance();
 		}
+	}
+
+	/**
+	 * Filter `mcp_adapter_create_default_server`.
+	 *
+	 * With the canonical MCP Adapter plugin active we leave the decision
+	 * alone, even though our `Requires Plugins: mcp-adapter` is often why
+	 * the plugin is installed. The trade-off is deliberate:
+	 *
+	 * - WooCommerce 11.3 sends merchants to that server
+	 *   (`/wp-json/mcp/mcp-adapter-default-server`) for core product and
+	 *   order abilities. Suppressing it from here would break their
+	 *   WooCommerce MCP connection whenever this plugin is active.
+	 * - It is the adapter plugin's own default, so a store gets it from
+	 *   any plugin that requires the adapter, not just this one.
+	 * - It is reachable by any logged-in user with `read` (the adapter's
+	 *   default), but it only exposes abilities marked `mcp.public`, and
+	 *   each still runs its own permission check. None of ours are
+	 *   `mcp.public`, and our WC REST key auth is scoped to our own routes,
+	 *   so it doesn't reach our surface or accept our connection key.
+	 *
+	 * Merchants who don't want it can turn it off with the adapter's own
+	 * `mcp_adapter_create_default_server` filter; we pass that through.
+	 *
+	 * When we're the ones booting a bundled library copy (WooCommerce
+	 * 10.x–11.2 without the plugin), nobody installed the adapter for its
+	 * default server, so we keep suppressing it.
+	 *
+	 * @param bool $create Whether to create the default server.
+	 * @return bool
+	 */
+	public function filter_default_mcp_server( $create ) {
+		if ( 'plugin' === self::mcp_adapter_source() ) {
+			return (bool) $create;
+		}
+
+		return false;
 	}
 
 	/**
@@ -396,8 +561,12 @@ class Plugin {
 	 * (which used `woocommerce_mcp_include_ability` + a late
 	 * `mcp_adapter_init` injection of resources/prompts). Our server owns
 	 * `/wp-json/woocommerce-claude/mcp` directly and ships a curated tool list, so the
-	 * deprecation of WC's MCP endpoint and the upcoming change to its default
-	 * inclusion rules don't affect us.
+	 * removal of WC's `/wp-json/woocommerce/mcp` endpoint in 11.3 doesn't
+	 * affect us — only the adapter's availability does (see
+	 * mcp_adapter_source()).
+	 *
+	 * Adapter 0.7.0 returns a WP_Error from `create_server()` instead of
+	 * throwing; older bundled copies throw. Both are logged.
 	 *
 	 * @param object $adapter The McpAdapter instance.
 	 * @return void
@@ -412,7 +581,7 @@ class Plugin {
 		}
 
 		try {
-			$adapter->create_server(
+			$result = $adapter->create_server(
 				self::MCP_SERVER_ID,
 				self::MCP_SERVER_NS,
 				self::MCP_SERVER_ROUTE,
@@ -440,12 +609,14 @@ class Plugin {
 				array( $this, 'authenticate_mcp_request' )
 			);
 		} catch ( \Throwable $e ) {
-			if ( function_exists( 'wc_get_logger' ) ) {
-				wc_get_logger()->error(
-					'WooCommerce for Claude MCP server initialization failed: ' . $e->getMessage(),
-					array( 'source' => 'woocommerce-claude-mcp' )
-				);
-			}
+			$result = new \WP_Error( 'server_creation_failed', $e->getMessage() );
+		}
+
+		if ( is_wp_error( $result ) && function_exists( 'wc_get_logger' ) ) {
+			wc_get_logger()->error(
+				'WooCommerce for Claude MCP server initialization failed: ' . $result->get_error_message(),
+				array( 'source' => 'woocommerce-claude-mcp' )
+			);
 		}
 	}
 

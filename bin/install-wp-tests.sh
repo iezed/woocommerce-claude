@@ -94,6 +94,19 @@ if [ ! -f "$PLUGIN_DIR/woocommerce/woocommerce.php" ]; then
     rm /tmp/woocommerce.zip
 fi
 
+# ── MCP Adapter ────────────────────────────────────────────────────────────────
+# WooCommerce 11.3 stops bundling the adapter; WooCommerce for Claude declares
+# `Requires Plugins: mcp-adapter`. Pinned so an adapter release can't change
+# the server API under CI without a deliberate bump.
+MCP_ADAPTER_VERSION="${MCP_ADAPTER_VERSION:-0.7.0}"
+if [ ! -f "$PLUGIN_DIR/mcp-adapter/mcp-adapter.php" ]; then
+    mkdir -p "$PLUGIN_DIR"
+    curl -sfL "https://downloads.wordpress.org/plugin/mcp-adapter.${MCP_ADAPTER_VERSION}.zip" \
+        -o /tmp/mcp-adapter.zip
+    unzip -q /tmp/mcp-adapter.zip -d "$PLUGIN_DIR"
+    rm /tmp/mcp-adapter.zip
+fi
+
 # ── Plugin under test ──────────────────────────────────────────────────────────
 ln -sfn "$PLUGIN_SOURCE_DIR" "$PLUGIN_DIR/woocommerce-claude"
 ln -sfn "$HEY_WOO_SOURCE_DIR" "$PLUGIN_DIR/hey-woo"

@@ -110,11 +110,17 @@ class SettingsPage extends \WC_Settings_Page {
 		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only setup flash.
 		$setup_notice_code = isset( $_GET['notice'] ) ? sanitize_key( wp_unslash( $_GET['notice'] ) ) : '';
 
+		$mcp_notice       = SetupPage::mcp_adapter_notice();
 		$connected_label  = __( 'Connected', 'woocommerce-claude' );
 		$ready_label      = __( 'Ready', 'woocommerce-claude' );
 		$not_set_up_label = __( 'Not set up', 'woocommerce-claude' );
-		$external_open    = '' === $setup_notice_code ? '' : 'open';
-		if ( $has_external_use ) {
+		// Open the panel whenever it carries a flash or an MCP Adapter
+		// notice, so the notice is never hidden behind a collapsed row.
+		$external_open = ( '' === $setup_notice_code && null === $mcp_notice ) ? '' : 'open';
+		if ( is_array( $mcp_notice ) && 'error' === $mcp_notice['kind'] ) {
+			$external_status_label = __( 'Action needed', 'woocommerce-claude' );
+			$external_status_class = 'woocommerce-claude-setup__pill--off';
+		} elseif ( $has_external_use ) {
 			$external_status_label = $connected_label;
 			$external_status_class = 'woocommerce-claude-setup__pill--live';
 		} elseif ( $has_external_key ) {

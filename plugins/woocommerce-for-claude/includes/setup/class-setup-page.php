@@ -7,6 +7,8 @@
 
 namespace WooCommerce\Claude\Setup;
 
+use WooCommerce\Claude\Plugin;
+
 defined( 'ABSPATH' ) || exit;
 
 /**
@@ -191,6 +193,64 @@ class SetupPage {
 	}
 
 	/**
+	 * Merchant-facing notice for when the MCP adapter is missing or only
+	 * available as WooCommerce's bundled copy.
+	 *
+	 * WooCommerce 11.3 stops bundling the adapter, so the
+	 * `/wp-json/woocommerce-claude/mcp` endpoint only exists while the MCP
+	 * Adapter plugin is active. Returns null when it is.
+	 *
+	 * @return array{kind:string,title:string,body:string,action_url:string,action_label:string}|null
+	 */
+	public static function mcp_adapter_notice() {
+		$source = Plugin::mcp_adapter_source();
+		if ( 'plugin' === $source ) {
+			return null;
+		}
+
+		$plugin_file  = Plugin::MCP_ADAPTER_PLUGIN_FILE;
+		$is_installed = file_exists( trailingslashit( WP_PLUGIN_DIR ) . $plugin_file );
+		$action_url   = '';
+		$action_label = '';
+
+		if ( $is_installed && current_user_can( 'activate_plugin', $plugin_file ) ) {
+			$action_url   = wp_nonce_url(
+				self_admin_url( 'plugins.php?action=activate&plugin=' . rawurlencode( $plugin_file ) ),
+				'activate-plugin_' . $plugin_file
+			);
+			$action_label = __( 'Activate MCP Adapter', 'woocommerce-claude' );
+		} elseif ( ! $is_installed && current_user_can( 'install_plugins' ) ) {
+			$action_url   = wp_nonce_url(
+				self_admin_url( 'update.php?action=install-plugin&plugin=' . Plugin::MCP_ADAPTER_PLUGIN_SLUG ),
+				'install-plugin_' . Plugin::MCP_ADAPTER_PLUGIN_SLUG
+			);
+			$action_label = __( 'Install MCP Adapter', 'woocommerce-claude' );
+		}
+
+		if ( 'bundled' === $source ) {
+			$kind  = 'warning';
+			$title = __( 'Install the MCP Adapter plugin before updating to WooCommerce 11.3', 'woocommerce-claude' );
+			$body  = __( 'Claude currently connects through a copy of the MCP Adapter that ships inside WooCommerce. WooCommerce 11.3 removes that copy, so install the free MCP Adapter plugin now to keep Claude connected after you update.', 'woocommerce-claude' );
+		} else {
+			$kind  = 'error';
+			$title = __( 'The MCP Adapter plugin is required to connect Claude', 'woocommerce-claude' );
+			$body  = __( 'WooCommerce for Claude uses the free MCP Adapter plugin from WordPress.org to run its Claude connection. Until it is installed and active, Claude apps cannot reach this store, even with a valid connection key.', 'woocommerce-claude' );
+		}
+
+		if ( '' === $action_url ) {
+			$body .= ' ' . __( 'Ask a site administrator to install and activate it.', 'woocommerce-claude' );
+		}
+
+		return array(
+			'kind'         => $kind,
+			'title'        => $title,
+			'body'         => $body,
+			'action_url'   => $action_url,
+			'action_label' => $action_label,
+		);
+	}
+
+	/**
 	 * Render the setup view. Called by SettingsPage::output() when the
 	 * External access section is active. Outputs HTML directly.
 	 *
@@ -212,6 +272,7 @@ class SetupPage {
 
 		$key_helper   = new RestApiKey();
 		$site_https   = self::site_is_https();
+		$mcp_notice   = self::mcp_adapter_notice();
 		$endpoint_url = self::endpoint_url();
 		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only flash message.
 		$notice_code = isset( $_GET['notice'] ) ? sanitize_key( wp_unslash( $_GET['notice'] ) ) : '';

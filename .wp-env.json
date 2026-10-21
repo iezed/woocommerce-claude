@@ -1,6 +1,6 @@
 {
   "core": "WordPress/WordPress#6.9",
-  "plugins": ["https://downloads.wordpress.org/plugin/woocommerce.10.7.0.zip", "https://downloads.wordpress.org/plugin/gutenberg.24.0.0.zip"],
+  "plugins": ["https://downloads.wordpress.org/plugin/woocommerce.10.7.0.zip", "https://downloads.wordpress.org/plugin/mcp-adapter.0.7.0.zip", "https://downloads.wordpress.org/plugin/gutenberg.24.0.0.zip"],
   "mappings": {
     "wp-content/plugins/hey-woo-monorepo": ".",
     "wp-content/plugins/hey-woo": "./plugins/hey-woo",
@@ -14,7 +14,7 @@
     "SCRIPT_DEBUG": true
   },
   "lifecycleScripts": {
-    "afterStart": "wp-env run cli -- wp plugin activate woocommerce woocommerce-claude hey-woo briefing-for-woocommerce && wp-env run cli -- wp wc tool run install_pages --user=admin && wp-env run cli -- wp option update woocommerce_store_address '123 Main Street' && wp-env run cli -- wp option update woocommerce_store_city 'London' && wp-env run cli -- wp option update woocommerce_store_postcode 'EC1A 1BB' && wp-env run cli -- wp option update woocommerce_default_country 'GB' && wp-env run cli -- wp option update woocommerce_currency 'GBP'"
+    "afterStart": "wp-env run cli -- wp plugin activate woocommerce mcp-adapter woocommerce-claude hey-woo briefing-for-woocommerce && wp-env run cli -- wp wc tool run install_pages --user=admin && wp-env run cli -- wp option update woocommerce_store_address '123 Main Street' && wp-env run cli -- wp option update woocommerce_store_city 'London' && wp-env run cli -- wp option update woocommerce_store_postcode 'EC1A 1BB' && wp-env run cli -- wp option update woocommerce_default_country 'GB' && wp-env run cli -- wp option update woocommerce_currency 'GBP'"
   },
   "env": {
     "tests": {

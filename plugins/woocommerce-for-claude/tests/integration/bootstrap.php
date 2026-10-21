@@ -47,6 +47,14 @@ function woocommerce_claude_tests_load_plugins() {
 		echo 'Could not find woocommerce/woocommerce.php under ' . esc_html( $plugin_dir ) . ' — is WooCommerce installed in the tests environment?' . PHP_EOL;
 		exit( 1 );
 	}
+	// The MCP Adapter plugin loads ahead of WooCommerce on a real site
+	// (`mcp-adapter/` sorts first), so its classes win over any copy
+	// WooCommerce 10.x–11.2 still bundles. WooCommerce 11.3+ ships none.
+	$mcp_adapter_candidates = glob( $plugin_dir . '/mcp-adapter*/mcp-adapter.php' );
+	if ( ! empty( $mcp_adapter_candidates ) ) {
+		require_once $mcp_adapter_candidates[0];
+	}
+
 	require_once $wc_candidates[0];
 
 	require_once $plugin_dir . '/woocommerce-claude/woocommerce-claude.php';
@@ -104,3 +112,40 @@ require $_tests_dir . '/includes/bootstrap.php';
 
 // Shared fixture helpers — `use`d by individual test classes.
 require_once __DIR__ . '/trait-analytics-fixtures.php';
+
+/**
+ * List an MCP server's tools, resources or prompts as `name`/`uri` pairs.
+ *
+ * MCP Adapter 0.7.0 takes a schema in `get_tools()` / `get_resources()` /
+ * `get_prompts()` and returns php-mcp-schema records (`getName()`,
+ * `getUri()`); the copies bundled in WooCommerce 10.x–11.2 take no
+ * argument and return adapter objects (`get_name()`, `get_uri()`).
+ *
+ * @param object $server MCP server.
+ * @param string $kind   One of `tools`, `resources`, `prompts`.
+ * @return array<int, array{name:string, uri:string}>
+ */
+function woocommerce_claude_tests_mcp_components( $server, $kind ) {
+	$getter = 'get_' . $kind;
+	$method = new ReflectionMethod( $server, $getter );
+	$items  = 0 === $method->getNumberOfRequiredParameters()
+		? $server->$getter()
+		: $server->$getter( \WP\McpSchema\Schemas::create()->forVersion( \WP\McpSchema\Schemas::V2025_11_25 ) );
+
+	$out = array();
+	foreach ( $items as $item ) {
+		$name = method_exists( $item, 'getName' ) ? $item->getName() : $item->get_name();
+		$uri  = '';
+		if ( method_exists( $item, 'getUri' ) ) {
+			$uri = $item->getUri();
+		} elseif ( method_exists( $item, 'get_uri' ) ) {
+			$uri = $item->get_uri();
+		}
+		$out[] = array(
+			'name' => (string) $name,
+			'uri'  => (string) $uri,
+		);
+	}
+
+	return $out;
+}

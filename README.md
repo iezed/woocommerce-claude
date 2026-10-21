@@ -29,7 +29,7 @@ For a typical WooCommerce store, the plugin's load is lighter than loading the W
 
 ### Claude Desktop — one click
 
-1. Install and activate WooCommerce for Claude. For local dev: `pnpm exec wp-env start`.
+1. Install and activate the free [MCP Adapter](https://wordpress.org/plugins/mcp-adapter/) plugin, then WooCommerce for Claude. For local dev, `pnpm exec wp-env start` installs both.
 2. Open **WooCommerce → Settings → WooCommerce for Claude** in WP admin (or click **Set up Claude** in the post-activation notice).
 3. If WooCommerce MCP integration isn't on yet, click **Enable WooCommerce MCP integration**.
 4. Click **Download WooCommerce for Claude**, then double-click the downloaded `.mcpb` file. Claude Desktop registers WooCommerce for Claude automatically — no copy-paste, no JSON, no API key wrangling.
@@ -215,7 +215,7 @@ WooCommerce core already exposes basic product and order CRUD via MCP. This proj
 | **WooCommerce core MCP** | HTTP transport, auth, product/order CRUD tools                    | WooCommerce core team |
 | **WooCommerce for Claude plugin**       | Analytics skills, knowledge resources, prompts, readiness scoring | This project          |
 
-Everything ships through the single endpoint at `/wp-json/woocommerce-claude/mcp`. There is no separate MCP server process to run — the plugin registers its abilities and stands up its own MCP server on `mcp_adapter_init` using the WordPress MCP adapter (vendored inside WooCommerce). The server bundles tools, resources, and prompts directly, and authenticates via HTTP Basic auth sourced from a WooCommerce REST API key with `read` or `read_write` scope. The short-lived pre-release `X-MCP-API-Key` header is still accepted as a compatibility fallback.
+Everything ships through the single endpoint at `/wp-json/woocommerce-claude/mcp`. There is no separate MCP server process to run — the plugin registers its abilities and stands up its own MCP server on `mcp_adapter_init` using the WordPress [MCP Adapter](https://wordpress.org/plugins/mcp-adapter/) plugin, which WooCommerce for Claude requires (WooCommerce 11.3 no longer bundles it). The server bundles tools, resources, and prompts directly, and authenticates via HTTP Basic auth sourced from a WooCommerce REST API key with `read` or `read_write` scope. The short-lived pre-release `X-MCP-API-Key` header is still accepted as a compatibility fallback.
 
 ---
 

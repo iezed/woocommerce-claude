@@ -216,7 +216,7 @@ WooCommerce core already exposes basic product and order CRUD via MCP. This proj
 | **WooCommerce core MCP** | HTTP transport, auth, product/order CRUD tools                    | WooCommerce core team |
 | **WooCommerce for Claude plugin**       | Analytics skills, knowledge resources, prompts, readiness scoring | This project          |
 
-Everything ships through the single endpoint at `/wp-json/woocommerce-claude/mcp`. There is no separate MCP server process to run — the plugin registers its abilities and stands up its own MCP server on `mcp_adapter_init` using the WordPress MCP adapter (vendored inside WooCommerce). The server bundles tools, resources, and prompts directly, and authenticates via HTTP Basic auth sourced from a WooCommerce REST API key with `read` or `read_write` scope. The short-lived pre-release `X-MCP-API-Key` header is still accepted as a compatibility fallback.
+Everything ships through the single endpoint at `/wp-json/woocommerce-claude/mcp`. There is no separate MCP server process to run — the plugin registers its abilities and stands up its own MCP server on `mcp_adapter_init` using the WordPress [MCP Adapter](https://wordpress.org/plugins/mcp-adapter/) plugin, which WooCommerce for Claude requires (WooCommerce 11.3 no longer bundles it). The server bundles tools, resources, and prompts directly, and authenticates via HTTP Basic auth sourced from a WooCommerce REST API key with `read` or `read_write` scope. The short-lived pre-release `X-MCP-API-Key` header is still accepted as a compatibility fallback.
 
 ---
 

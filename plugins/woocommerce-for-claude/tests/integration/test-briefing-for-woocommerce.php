@@ -1,6 +1,6 @@
 <?php
 /**
- * Briefing for WooCommerce: its MCP server, key check, and the promise on its
+ * Briefing for WooCommerce: its REST route, key check, and the promise on its
  * landing page — "We read totals. Never people."
  *
  * Runs alongside WooCommerce for Claude (both are loaded by the bootstrap), so
@@ -33,12 +33,20 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 	private $original_server;
 
 	/**
+	 * The original $_GET, restored in tear_down.
+	 *
+	 * @var array<string, mixed>
+	 */
+	private $original_get;
+
+	/**
 	 * Start each test with no credentials on the request.
 	 */
 	public function set_up() {
 		parent::set_up();
 		rest_get_server();
 		$this->original_server = $_SERVER;
+		$this->original_get    = $_GET; // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- test fixture backup.
 		unset( $_SERVER['PHP_AUTH_USER'], $_SERVER['PHP_AUTH_PW'], $_SERVER['HTTP_AUTHORIZATION'] );
 	}
 
@@ -47,6 +55,8 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 	 */
 	public function tear_down() {
 		$_SERVER = $this->original_server;
+		$_GET    = $this->original_get;
+		unset( $GLOBALS['wp_rest_application_password_status'] );
 		global $wpdb;
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery -- test fixture cleanup.
 		$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->prefix}woocommerce_api_keys WHERE description LIKE %s", '%' . $wpdb->esc_like( self::FIXTURE_KEY ) . '%' ) );
@@ -55,33 +65,157 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 	}
 
 	/**
-	 * The server lives at /wp-json/briefing-for-woocommerce/mcp with exactly the
-	 * briefing's tools, and no resources or prompts.
+	 * The route lives at /wp-json/briefing-for-woocommerce/call, POST only, and
+	 * the namespace index the Briefing app detects the plugin by is there. The
+	 * MCP endpoint is gone.
 	 */
-	public function test_server_exposes_exactly_the_briefing_tools() {
-		$server = \WP\MCP\Core\McpAdapter::instance()->get_server( Plugin::MCP_SERVER_ID );
-		$this->assertNotNull( $server, 'Briefing MCP server must be registered.' );
-		$this->assertSame( 'briefing-for-woocommerce', $server->get_server_route_namespace() );
-		$this->assertSame( 'mcp', $server->get_server_route() );
+	public function test_route_replaces_the_mcp_server() {
+		$routes = rest_get_server()->get_routes();
+		$this->assertArrayHasKey( '/briefing-for-woocommerce/call', $routes );
+		$this->assertArrayHasKey( '/briefing-for-woocommerce', $routes );
+		$this->assertArrayNotHasKey( '/briefing-for-woocommerce/mcp', $routes );
+		$this->assertSame( array( 'POST' => true ), $routes['/briefing-for-woocommerce/call'][0]['methods'] );
 
-		$names = array();
-		foreach ( $server->get_tools() as $tool ) {
-			$names[] = $tool->get_name();
+		// Kept off any MCP adapter's default server, now the plugin no longer
+		// switches that server off.
+		foreach ( Abilities::TOOLS as $name ) {
+			$this->assertSame( array( 'public' => false ), wp_get_ability( $name )->get_meta_item( 'mcp' ), $name );
 		}
-		sort( $names );
-		$this->assertSame(
-			array( 'briefing-breakdown', 'briefing-rows', 'briefing-series', 'briefing-stock-at-risk', 'briefing-store-profile', 'briefing-totals' ),
-			$names
-		);
-		$this->assertCount( 0, $server->get_resources() );
-		$this->assertCount( 0, $server->get_prompts() );
 	}
 
 	/**
-	 * WooCommerce for Claude's server is untouched by the second plugin.
+	 * Calls run in order with a read key, one result each: data for the
+	 * briefing's tools, the ability's own error code when it refuses, and
+	 * unknown_tool for anything that isn't one of the six.
 	 */
-	public function test_woocommerce_for_claude_server_still_registered() {
-		$this->assertNotNull( \WP\MCP\Core\McpAdapter::instance()->get_server( 'woocommerce-claude' ) );
+	public function test_route_runs_calls_in_order() {
+		$admin = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		$this->set_basic_auth( $this->insert_key( $admin, 'read' ) );
+
+		$response = $this->call_route(
+			array(
+				array(
+					'name'      => 'briefing-store-profile',
+					'arguments' => new stdClass(),
+				),
+				array(
+					'name'      => 'briefing-totals',
+					'arguments' => array( 'subject' => 'revenue' ) + $this->recent_range( 7 ),
+				),
+				array(
+					'name'      => 'briefing-rows',
+					'arguments' => array(
+						'entity'  => 'customers',
+						'filters' => array(
+							array(
+								'field'    => 'postcode',
+								'operator' => 'is',
+								'value'    => 'X',
+							),
+						),
+					) + $this->recent_range( 7 ),
+				),
+				array( 'name' => 'wc-analytics-totals' ),
+				array( 'name' => 'briefing/totals-of-something-else' ),
+			)
+		);
+
+		$this->assertSame( 200, $response->get_status() );
+		$results = $response->get_data()['results'];
+		$this->assertCount( 5, $results );
+		$this->assertTrue( $results[0]['ok'] );
+		$this->assertSame( BRIEFING_FOR_WOOCOMMERCE_VERSION, $results[0]['data']['version'] );
+		$this->assertTrue( $results[1]['ok'], wp_json_encode( $results[1] ) );
+		$this->assertFalse( $results[2]['ok'] );
+		$this->assertSame( 'briefing_rows_identifying_filter', $results[2]['code'] );
+		$this->assertSame( 'unknown_tool', $results[3]['code'] );
+		$this->assertSame( 'unknown_tool', $results[4]['code'] );
+	}
+
+	/**
+	 * A write-only key, a wrong secret and no credential get rest_forbidden,
+	 * which the Briefing app reads as a revoked key.
+	 */
+	public function test_route_refuses_bad_keys() {
+		$admin       = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		list( $key ) = explode( ':', $this->insert_key( $admin, 'read' ) );
+
+		foreach ( array(
+			'write key'    => $this->insert_key( $admin, 'write' ),
+			'wrong secret' => $key . ':cs_wrong',
+			'no key'       => null,
+		) as $label => $credential ) {
+			wp_set_current_user( 0 );
+			unset( $_SERVER['PHP_AUTH_USER'], $_SERVER['PHP_AUTH_PW'] );
+			if ( $credential ) {
+				$this->set_basic_auth( $credential );
+			}
+			$response = $this->call_route( array( array( 'name' => 'briefing-store-profile' ) ) );
+			$this->assertSame( 401, $response->get_status(), $label );
+			$this->assertSame( 'rest_forbidden', $response->get_data()['code'], $label );
+		}
+	}
+
+	/**
+	 * A key whose user can't manage WooCommerce authenticates, but every call
+	 * is refused.
+	 */
+	public function test_route_calls_require_manage_woocommerce() {
+		$this->set_basic_auth( $this->insert_key( self::factory()->user->create( array( 'role' => 'subscriber' ) ), 'read' ) );
+		$response = $this->call_route( array( array( 'name' => 'briefing-store-profile' ) ) );
+		$this->assertSame( 200, $response->get_status() );
+		$this->assertFalse( $response->get_data()['results'][0]['ok'] );
+	}
+
+	/**
+	 * At most MAX_CALLS calls, and at least one.
+	 */
+	public function test_route_limits_calls() {
+		$this->set_basic_auth( $this->insert_key( self::factory()->user->create( array( 'role' => 'administrator' ) ), 'read' ) );
+		$too_many = array_fill( 0, Plugin::MAX_CALLS + 1, array( 'name' => 'briefing-store-profile' ) );
+		$this->assertSame( 400, $this->call_route( $too_many )->get_status() );
+		$this->assertSame( 400, $this->call_route( array() )->get_status() );
+
+		// The most a request may carry, each without `arguments`.
+		$response = $this->call_route( array_slice( $too_many, 1 ) );
+		$this->assertSame( 200, $response->get_status() );
+		$results = $response->get_data()['results'];
+		$this->assertCount( Plugin::MAX_CALLS, $results );
+		foreach ( $results as $i => $result ) {
+			$this->assertTrue( $result['ok'], "call {$i}: " . wp_json_encode( $result ) );
+		}
+	}
+
+	/**
+	 * A read key gets through WordPress's and WooCommerce's own authentication
+	 * on a real request, on a site where an application password exists:
+	 * WordPress's application-password check would turn the `ck_` key down
+	 * (as it does on other routes), and WooCommerce's REST auth treats every
+	 * POST as a write. Runs the hooks a served request runs before dispatch,
+	 * which dispatch() alone skips.
+	 */
+	public function test_route_gets_past_wordpress_and_woocommerce_auth() {
+		$admin = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		WP_Application_Passwords::create_new_application_password( $admin, array( 'name' => 'Some other app' ) );
+		add_filter( 'wp_is_application_passwords_available', '__return_true' );
+		// What WordPress decides from REST_REQUEST, which isn't defined in tests.
+		add_filter( 'application_password_is_api_request', '__return_true', 1 );
+		$this->set_basic_auth( $this->insert_key( $admin, 'read' ) );
+
+		// phpcs:disable WooCommerce.Commenting.CommentHooks.MissingHookComment -- running WordPress's own auth filters as a served request does; not hook definitions.
+		$_SERVER['REQUEST_URI'] = '/wp-json/wp/v2/posts';
+		$this->assertFalse( (bool) apply_filters( 'determine_current_user', false ) );
+		$this->assertWPError( apply_filters( 'rest_authentication_errors', null ), 'Other routes turn the key down as an application password.' );
+
+		unset( $GLOBALS['wp_rest_application_password_status'] );
+		wp_set_current_user( 0 );
+		$_SERVER['REQUEST_URI'] = '/wp-json/briefing-for-woocommerce/call';
+		$this->assertFalse( (bool) apply_filters( 'determine_current_user', false ) );
+		$this->assertNotWPError( apply_filters( 'rest_authentication_errors', null ) );
+		// phpcs:enable WooCommerce.Commenting.CommentHooks.MissingHookComment
+		$response = $this->call_route( array( array( 'name' => 'briefing-store-profile' ) ) );
+		$this->assertSame( 200, $response->get_status() );
+		$this->assertTrue( $response->get_data()['results'][0]['ok'] );
 	}
 
 	/**
@@ -99,17 +233,17 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 		) as $permissions => $expected ) {
 			wp_set_current_user( 0 );
 			$this->set_basic_auth( $this->insert_key( $admin, $permissions ) );
-			$this->assertSame( $expected, $plugin->authenticate_mcp_request( new WP_REST_Request() ), "{$permissions} key" );
+			$this->assertSame( $expected, $plugin->authenticate_request( new WP_REST_Request() ), "{$permissions} key" );
 		}
 
 		wp_set_current_user( 0 );
 		list( $key ) = explode( ':', $this->insert_key( $admin, 'read' ) );
 		$this->set_basic_auth( $key . ':cs_wrong' );
-		$this->assertFalse( $plugin->authenticate_mcp_request( new WP_REST_Request() ), 'wrong secret' );
+		$this->assertFalse( $plugin->authenticate_request( new WP_REST_Request() ), 'wrong secret' );
 		$this->assertSame( 0, get_current_user_id() );
 
 		unset( $_SERVER['PHP_AUTH_USER'], $_SERVER['PHP_AUTH_PW'] );
-		$this->assertFalse( $plugin->authenticate_mcp_request( new WP_REST_Request() ), 'no credential' );
+		$this->assertFalse( $plugin->authenticate_request( new WP_REST_Request() ), 'no credential' );
 	}
 
 	/**
@@ -120,7 +254,7 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 		$request = new WP_REST_Request();
 		// phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_encode -- building an HTTP Basic auth header.
 		$request->set_header( 'authorization', 'Basic ' . base64_encode( $this->insert_key( $admin, 'read' ) ) );
-		$this->assertTrue( Plugin::instance()->authenticate_mcp_request( $request ) );
+		$this->assertTrue( Plugin::instance()->authenticate_request( $request ) );
 		$this->assertSame( $admin, get_current_user_id() );
 	}
 
@@ -735,6 +869,27 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 			$this->assertNotWPError( $result, $label . ': ' . ( is_wp_error( $result ) ? $result->get_error_message() : '' ) );
 			$this->assert_no_people( $result, $label );
 		}
+
+		// And the same calls through the route, as the Briefing app makes them.
+		$admin = get_current_user_id();
+		wp_set_current_user( 0 );
+		$this->set_basic_auth( $this->insert_key( $admin, 'read' ) );
+		foreach ( array_chunk( $this->every_tool_call(), Plugin::MAX_CALLS, true ) as $chunk ) {
+			$calls = array();
+			foreach ( $chunk as $call ) {
+				$calls[] = array(
+					'name'      => str_replace( 'briefing/', 'briefing-', $call[0] ),
+					'arguments' => $call[1] ? $call[1] : new stdClass(),
+				);
+			}
+			$response = $this->call_route( $calls );
+			$this->assertSame( 200, $response->get_status() );
+			foreach ( array_keys( $chunk ) as $i => $label ) {
+				$result = $response->get_data()['results'][ $i ];
+				$this->assertTrue( $result['ok'], "route {$label}: " . wp_json_encode( $result ) );
+				$this->assert_no_people( $result['data'], "route {$label}" );
+			}
+		}
 	}
 
 	/**
@@ -832,16 +987,30 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 	}
 
 	/**
-	 * Application-password auth is skipped for our MCP route only.
+	 * Application-password auth is skipped for our route only, with pretty
+	 * and plain permalinks.
 	 */
-	public function test_app_password_auth_skipped_for_mcp_route_only() {
+	public function test_app_password_auth_skipped_for_our_route_only() {
 		$plugin = Plugin::instance();
 
-		$_SERVER['REQUEST_URI'] = '/wp-json/briefing-for-woocommerce/mcp';
-		$this->assertFalse( $plugin->exclude_mcp_route_from_app_password_auth( true ) );
+		foreach ( array( '/wp-json/briefing-for-woocommerce/call', '/wp-json/briefing-for-woocommerce/call/', '/wp-json/briefing-for-woocommerce/call?x=1' ) as $uri ) {
+			$_SERVER['REQUEST_URI'] = $uri;
+			$this->assertFalse( $plugin->exclude_route_from_app_password_auth( true ), $uri );
+		}
+
+		$_SERVER['REQUEST_URI'] = '/?rest_route=/briefing-for-woocommerce/call';
+		$_GET['rest_route']     = '/briefing-for-woocommerce/call';
+		$this->assertFalse( $plugin->exclude_route_from_app_password_auth( true ) );
+		unset( $_GET['rest_route'] );
+
+		// Only the route itself, not others that start the same way.
+		foreach ( array( '/wp-json/briefing-for-woocommerce/callback', '/wp-json/briefing-for-woocommerce/calls', '/wp-json/briefing-for-woocommerce' ) as $uri ) {
+			$_SERVER['REQUEST_URI'] = $uri;
+			$this->assertTrue( $plugin->exclude_route_from_app_password_auth( true ), $uri );
+		}
 
 		$_SERVER['REQUEST_URI'] = '/wp-json/wc/v3/orders';
-		$this->assertTrue( $plugin->exclude_mcp_route_from_app_password_auth( true ) );
+		$this->assertTrue( $plugin->exclude_route_from_app_password_auth( true ) );
 	}
 
 	/**
@@ -1197,6 +1366,19 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 			)
 		);
 		return $consumer_key . ':' . $consumer_secret;
+	}
+
+	/**
+	 * POST calls to the route, as the Briefing app does.
+	 *
+	 * @param array $calls `{ name, arguments }` calls.
+	 * @return WP_REST_Response
+	 */
+	private function call_route( array $calls ) {
+		$request = new WP_REST_Request( 'POST', '/briefing-for-woocommerce/call' );
+		$request->set_header( 'content-type', 'application/json' );
+		$request->set_body( wp_json_encode( array( 'calls' => $calls ) ) );
+		return rest_get_server()->dispatch( $request );
 	}
 
 	/**

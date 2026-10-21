@@ -37,7 +37,7 @@ class Abilities {
 	const ROWS          = 'briefing/rows';
 
 	/**
-	 * The tools on the MCP server, and nothing else.
+	 * The tools the route runs, and nothing else.
 	 */
 	const TOOLS = array( self::TOTALS, self::BREAKDOWN, self::SERIES, self::STORE_PROFILE, self::STOCK_AT_RISK, self::ROWS );
 
@@ -318,6 +318,9 @@ class Abilities {
 						'idempotent' => true,
 					),
 					'show_in_rest' => false,
+					// Never on an MCP adapter's default server: the briefing's
+					// route is the only way in, behind its key check.
+					'mcp'          => array( 'public' => false ),
 				),
 			)
 		);

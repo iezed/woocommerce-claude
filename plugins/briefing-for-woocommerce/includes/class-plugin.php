@@ -129,8 +129,16 @@ class Plugin {
 	 * @return array
 	 */
 	public static function run_call( array $call ) {
+		if ( ! function_exists( 'wp_get_ability' ) ) {
+			return array(
+				'ok'    => false,
+				'code'  => 'abilities_unavailable',
+				'error' => __( "WordPress's Abilities API isn't available on this site.", 'briefing-for-woocommerce' ),
+			);
+		}
+
 		$name    = self::ability_name( isset( $call['name'] ) ? (string) $call['name'] : '' );
-		$ability = $name && function_exists( 'wp_get_ability' ) ? wp_get_ability( $name ) : null;
+		$ability = $name ? wp_get_ability( $name ) : null;
 		if ( ! $ability ) {
 			return array(
 				'ok'    => false,
@@ -264,12 +272,13 @@ class Plugin {
 
 	/**
 	 * Don't run application-password auth on our route (see the constructor).
+	 * Only the route itself, so no other route under the namespace loses it.
 	 *
 	 * @param bool $is_api_request What WP would otherwise consider this request.
 	 * @return bool
 	 */
 	public function exclude_route_from_app_password_auth( $is_api_request ) {
-		if ( $is_api_request && 0 === strpos( self::current_rest_route(), self::REST_NAMESPACE . '/' . self::REST_ROUTE ) ) {
+		if ( $is_api_request && self::REST_NAMESPACE . '/' . self::REST_ROUTE === rtrim( self::current_rest_route(), '/' ) ) {
 			return false;
 		}
 		return $is_api_request;

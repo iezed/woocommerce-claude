@@ -33,12 +33,20 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 	private $original_server;
 
 	/**
+	 * The original $_GET, restored in tear_down.
+	 *
+	 * @var array<string, mixed>
+	 */
+	private $original_get;
+
+	/**
 	 * Start each test with no credentials on the request.
 	 */
 	public function set_up() {
 		parent::set_up();
 		rest_get_server();
 		$this->original_server = $_SERVER;
+		$this->original_get    = $_GET; // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- test fixture backup.
 		unset( $_SERVER['PHP_AUTH_USER'], $_SERVER['PHP_AUTH_PW'], $_SERVER['HTTP_AUTHORIZATION'] );
 	}
 
@@ -47,6 +55,8 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 	 */
 	public function tear_down() {
 		$_SERVER = $this->original_server;
+		$_GET    = $this->original_get;
+		unset( $GLOBALS['wp_rest_application_password_status'] );
 		global $wpdb;
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery -- test fixture cleanup.
 		$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->prefix}woocommerce_api_keys WHERE description LIKE %s", '%' . $wpdb->esc_like( self::FIXTURE_KEY ) . '%' ) );
@@ -65,6 +75,12 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 		$this->assertArrayHasKey( '/briefing-for-woocommerce', $routes );
 		$this->assertArrayNotHasKey( '/briefing-for-woocommerce/mcp', $routes );
 		$this->assertSame( array( 'POST' => true ), $routes['/briefing-for-woocommerce/call'][0]['methods'] );
+
+		// Kept off any MCP adapter's default server, now the plugin no longer
+		// switches that server off.
+		foreach ( Abilities::TOOLS as $name ) {
+			$this->assertSame( array( 'public' => false ), wp_get_ability( $name )->get_meta_item( 'mcp' ), $name );
+		}
 	}
 
 	/**
@@ -159,22 +175,47 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 		$too_many = array_fill( 0, Plugin::MAX_CALLS + 1, array( 'name' => 'briefing-store-profile' ) );
 		$this->assertSame( 400, $this->call_route( $too_many )->get_status() );
 		$this->assertSame( 400, $this->call_route( array() )->get_status() );
-		$this->assertSame( 200, $this->call_route( array_slice( $too_many, 1 ) )->get_status() );
+
+		// The most a request may carry, each without `arguments`.
+		$response = $this->call_route( array_slice( $too_many, 1 ) );
+		$this->assertSame( 200, $response->get_status() );
+		$results = $response->get_data()['results'];
+		$this->assertCount( Plugin::MAX_CALLS, $results );
+		foreach ( $results as $i => $result ) {
+			$this->assertTrue( $result['ok'], "call {$i}: " . wp_json_encode( $result ) );
+		}
 	}
 
 	/**
-	 * WooCommerce's own REST authentication, which treats every POST as a
-	 * write, doesn't claim the route, so a read key reaches our check.
+	 * A read key gets through WordPress's and WooCommerce's own authentication
+	 * on a real request, on a site where an application password exists:
+	 * WordPress's application-password check would turn the `ck_` key down
+	 * (as it does on other routes), and WooCommerce's REST auth treats every
+	 * POST as a write. Runs the hooks a served request runs before dispatch,
+	 * which dispatch() alone skips.
 	 */
-	public function test_route_is_outside_woocommerce_rest_auth() {
-		$auth  = ( new ReflectionClass( 'WC_REST_Authentication' ) )->newInstanceWithoutConstructor();
-		$check = new ReflectionMethod( 'WC_REST_Authentication', 'is_request_to_rest_api' );
-		$check->setAccessible( true );
+	public function test_route_gets_past_wordpress_and_woocommerce_auth() {
+		$admin = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		WP_Application_Passwords::create_new_application_password( $admin, array( 'name' => 'Some other app' ) );
+		add_filter( 'wp_is_application_passwords_available', '__return_true' );
+		// What WordPress decides from REST_REQUEST, which isn't defined in tests.
+		add_filter( 'application_password_is_api_request', '__return_true', 1 );
+		$this->set_basic_auth( $this->insert_key( $admin, 'read' ) );
 
+		// phpcs:disable WooCommerce.Commenting.CommentHooks.MissingHookComment -- running WordPress's own auth filters as a served request does; not hook definitions.
+		$_SERVER['REQUEST_URI'] = '/wp-json/wp/v2/posts';
+		$this->assertFalse( (bool) apply_filters( 'determine_current_user', false ) );
+		$this->assertWPError( apply_filters( 'rest_authentication_errors', null ), 'Other routes turn the key down as an application password.' );
+
+		unset( $GLOBALS['wp_rest_application_password_status'] );
+		wp_set_current_user( 0 );
 		$_SERVER['REQUEST_URI'] = '/wp-json/briefing-for-woocommerce/call';
-		$this->assertFalse( $check->invoke( $auth ) );
-		$_SERVER['REQUEST_URI'] = '/wp-json/wc/v3/orders';
-		$this->assertTrue( $check->invoke( $auth ) );
+		$this->assertFalse( (bool) apply_filters( 'determine_current_user', false ) );
+		$this->assertNotWPError( apply_filters( 'rest_authentication_errors', null ) );
+		// phpcs:enable WooCommerce.Commenting.CommentHooks.MissingHookComment
+		$response = $this->call_route( array( array( 'name' => 'briefing-store-profile' ) ) );
+		$this->assertSame( 200, $response->get_status() );
+		$this->assertTrue( $response->get_data()['results'][0]['ok'] );
 	}
 
 	/**
@@ -952,13 +993,21 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 	public function test_app_password_auth_skipped_for_our_route_only() {
 		$plugin = Plugin::instance();
 
-		$_SERVER['REQUEST_URI'] = '/wp-json/briefing-for-woocommerce/call';
-		$this->assertFalse( $plugin->exclude_route_from_app_password_auth( true ) );
+		foreach ( array( '/wp-json/briefing-for-woocommerce/call', '/wp-json/briefing-for-woocommerce/call/', '/wp-json/briefing-for-woocommerce/call?x=1' ) as $uri ) {
+			$_SERVER['REQUEST_URI'] = $uri;
+			$this->assertFalse( $plugin->exclude_route_from_app_password_auth( true ), $uri );
+		}
 
 		$_SERVER['REQUEST_URI'] = '/?rest_route=/briefing-for-woocommerce/call';
 		$_GET['rest_route']     = '/briefing-for-woocommerce/call';
 		$this->assertFalse( $plugin->exclude_route_from_app_password_auth( true ) );
 		unset( $_GET['rest_route'] );
+
+		// Only the route itself, not others that start the same way.
+		foreach ( array( '/wp-json/briefing-for-woocommerce/callback', '/wp-json/briefing-for-woocommerce/calls', '/wp-json/briefing-for-woocommerce' ) as $uri ) {
+			$_SERVER['REQUEST_URI'] = $uri;
+			$this->assertTrue( $plugin->exclude_route_from_app_password_auth( true ), $uri );
+		}
 
 		$_SERVER['REQUEST_URI'] = '/wp-json/wc/v3/orders';
 		$this->assertTrue( $plugin->exclude_route_from_app_password_auth( true ) );

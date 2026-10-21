@@ -4,7 +4,7 @@ Lets [Briefing for WooCommerce](https://briefing.woocommerce.com/) read a store'
 
 The merchant connects from the Briefing site and approves a **read-only** key on WooCommerce's own approval screen. Briefing then reads through this plugin's REST route, `POST /wp-json/briefing-for-woocommerce/call`. It sends all of a request's calls together (`{ "calls": [ { "name": "briefing-totals", "arguments": { … } } ] }`) and gets one result per call, in order (`{ "results": [ { "ok": true, "data": … }, { "ok": false, "code": …, "error": … } ] }`).
 
-Up to 0.3.0 this was an MCP endpoint at `/wp-json/briefing-for-woocommerce/mcp`, served by the MCP adapter WooCommerce bundled. WooCommerce 11.3 stops bundling the adapter, so 0.4.0 answers on a plain route and needs no MCP adapter. It also no longer switches off the adapter's default server, which is where WooCommerce's own MCP tools live from 11.3.
+Up to 0.3.0 this was an MCP endpoint at `/wp-json/briefing-for-woocommerce/mcp`, served by the MCP adapter WooCommerce bundled. WooCommerce 11.3 stops bundling the adapter, so 0.4.0 answers on a plain route and needs no MCP adapter. It also no longer switches off the adapter's default server, which is where WooCommerce's own MCP tools live from 11.3. Its tools are marked `mcp.public => false`, so they never appear on that server.
 
 ## What it can read
 

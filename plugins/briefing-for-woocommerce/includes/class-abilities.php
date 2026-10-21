@@ -318,6 +318,9 @@ class Abilities {
 						'idempotent' => true,
 					),
 					'show_in_rest' => false,
+					// Never on an MCP adapter's default server: the briefing's
+					// route is the only way in, behind its key check.
+					'mcp'          => array( 'public' => false ),
 				),
 			)
 		);

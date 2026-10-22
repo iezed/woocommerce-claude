@@ -48,7 +48,7 @@ ORDERS — filter orders in the period. Default status: paid (completed + proces
   Enum (status_enum): status — allowed values completed, processing, on-hold, pending, failed, cancelled, refunded (merchant-friendly; the engine prepends wc- on the way to SQL)
   Line-item subquery: product_id — "order contains a line item with this product id" (uses EXISTS so orders with multiple matching line items are NOT double-counted)
 
-  Attribution channel values are human-readable (Organic Search, Direct, Paid Search, Email, Social, Referral) — same vocabulary as wc-analytics-breakdown subject=attribution dimension=channel.
+  Attribution channel values are human-readable (Organic Search, Direct, Paid Search, Email, Social, Referral, Display, Affiliates, Tagged links, Web admin, Mobile app), worked out from the kind of visit, not the site — same vocabulary as wc-analytics-breakdown subject=attribution dimension=channel.
 
 PRODUCTS — filter products in the catalog, with period-scoped sales aggregates joined. Catalog attributes (price, stock, category) are as-of-now regardless of period; sales aggregates are period-scoped.
 

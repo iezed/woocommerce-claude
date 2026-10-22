@@ -113,14 +113,14 @@ USE THIS SUBJECT WHEN the merchant asks any of:
 This is the ONLY surface that slices the on-hold pipeline by acquisition dimension. Reach for it even when the merchant's first question is framed as pipeline-scoped rather than revenue-scoped — it answers both.
 
 GROUPING DIMENSIONS:
-- channel (default): origin buckets like Organic Search, Paid Search, Direct, Email, Social, Referral. Lead with this unless the merchant asks for something more specific.
+- channel (default): the kind of visit — Organic Search, Paid Search, Direct, Email, Social, Referral, Display, Affiliates, Tagged links (a tagged link whose medium isn't one of those), Web admin, Mobile app. Each referring site is a source within Referral, not a channel of its own. Lead with this unless the merchant asks for something more specific.
 - source: the raw UTM source (google, facebook, klaviyo, etc.). More granular than channel. IMPORTANT: source is the *platform* (google, bing), NOT the search query — see term for that.
 - medium: UTM medium — the classification within a source (cpc, organic, email, social, referral, (none)). Answers "what kind of traffic was this?" regardless of source. Useful for paid-vs-organic splits within the same source (google/cpc vs google/organic). Coverage is usually high.
 - campaign: UTM campaign name. Coverage is often low because most traffic doesn't carry a campaign tag.
 - term: UTM term — the keyword for paid search. Populated automatically by Google Ads / Bing Ads when auto-tagging is enabled, or manually via tagged URLs. ONLY covers PAID keyword data. Organic search queries are NOT available (Google anonymises them as "(not provided)" since 2011). If coverage is near-zero, the merchant likely hasn't enabled ad-platform auto-tagging yet.
 - content: UTM content — the ad creative variant or A/B test identifier. Same "only if tagging is on" caveat as term.
 - device: desktop, mobile, tablet.
-- channel_source: channel + source combined ("Organic Search: google" vs "Organic Search: bing"). Collapses to just the channel for origins that never carry a distinct source (Direct, Email, Referral, etc.).
+- channel_source: channel + source combined ("Organic Search: google" vs "Organic Search: bing", "Referral: facebook.com" vs "Referral: claude.ai"). Collapses to just the channel for channels that never carry a distinct source (Direct, Email, Web admin, etc.).
 
 THREE VIEWS PER ROW — same pattern as the global block. Field paths: top_groups[].net_revenue / pipeline_revenue / admin_equivalent_revenue. Per-row pipeline_customers is the distinct-customer count for the group's on-hold orders.
 

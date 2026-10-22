@@ -75,6 +75,7 @@ trait AnalyticsFixtures {
 		'term'     => '_wc_order_attribution_utm_term',
 		'content'  => '_wc_order_attribution_utm_content',
 		'device'   => '_wc_order_attribution_device_type',
+		'type'     => '_wc_order_attribution_source_type',
 	);
 
 	/**

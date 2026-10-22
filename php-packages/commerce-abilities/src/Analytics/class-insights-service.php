@@ -433,8 +433,10 @@ class InsightsService {
 			default:
 				$meta = AnalyticsService::get_order_meta_source();
 				return array(
-					'join'  => "LEFT JOIN {$meta['table']} fch ON fch.{$meta['id_column']} = c.first_order_id AND fch.meta_key = '_wc_order_attribution_origin'",
-					'expr'  => 'fch.meta_value',
+					'join'  => "LEFT JOIN {$meta['table']} fch ON fch.{$meta['id_column']} = c.first_order_id AND fch.meta_key = '_wc_order_attribution_origin'"
+						. " LEFT JOIN {$meta['table']} fct ON fct.{$meta['id_column']} = c.first_order_id AND fct.meta_key = '_wc_order_attribution_source_type'"
+						. " LEFT JOIN {$meta['table']} fcm ON fcm.{$meta['id_column']} = c.first_order_id AND fcm.meta_key = '_wc_order_attribution_utm_medium'",
+					'expr'  => AnalyticsService::attribution_channel_sql( 'fch', 'fct', 'fcm' ),
 					'empty' => '(Unassigned)',
 				);
 		}

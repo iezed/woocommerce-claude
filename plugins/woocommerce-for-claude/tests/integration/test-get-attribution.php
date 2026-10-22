@@ -508,6 +508,151 @@ class Test_Get_Attribution extends WP_UnitTestCase {
 	}
 
 	/**
+	 * Orders as WooCommerce records them: the origin is a per-site label
+	 * ("Referral: Facebook.com", "Source: newsletter") and the source type
+	 * says what kind of visit it was. Channels come from the source type
+	 * (a tagged link's medium refining it), and the site is the source
+	 * under it, so two referral sites are one Referral channel with two
+	 * sources, not two channels.
+	 */
+	public function test_channel_comes_from_source_type() {
+		$week = array(
+			'date_start' => '2025-11-03',
+			'date_end'   => '2025-11-09',
+		);
+		$this->seed_attributed_orders(
+			'2025-11-0',
+			3,
+			array(
+				array( 120, 'Referral: Facebook.com', 'referral', 'facebook.com', 'referral' ),
+				array( 80, 'Referral: Woocommerce.com', 'referral', 'woocommerce.com', '' ),
+				array( 50, 'Source: newsletter', 'utm', 'newsletter', 'email' ),
+				array( 40, 'Source: google', 'utm', 'google', 'cpc' ),
+				array( 30, 'Source: partner', 'utm', 'partner', 'qr' ),
+				array( 20, 'Organic: Google', 'organic', 'google', 'organic' ),
+				array( 10, 'Direct', 'typein', '(direct)', 'typein' ),
+			)
+		);
+
+		$channels = $this->run_ability( array( 'group_by' => 'channel' ) + $week );
+		$expected = array(
+			'Referral'       => 200.00,
+			'Email'          => 50.00,
+			'Paid Search'    => 40.00,
+			'Tagged links'   => 30.00,
+			'Organic Search' => 20.00,
+			'Direct'         => 10.00,
+		);
+		foreach ( $expected as $channel => $revenue ) {
+			$row = $this->find_group( $channels['top_groups'], $channel );
+			$this->assertNotNull( $row, "{$channel} should be a channel." );
+			$this->assertSame( $revenue, (float) $row['net_revenue'], $channel );
+		}
+		$this->assertNull( $this->find_group( $channels['top_groups'], 'Referral: Facebook.com' ), 'The origin label is not a channel.' );
+
+		$sources = $this->run_ability( array( 'group_by' => 'channel_source' ) + $week );
+		$this->assertSame( 120.00, (float) $this->find_group( $sources['top_groups'], 'Referral: facebook.com' )['net_revenue'] );
+		$this->assertSame( 80.00, (float) $this->find_group( $sources['top_groups'], 'Referral: woocommerce.com' )['net_revenue'] );
+		$this->assertNotNull( $this->find_group( $sources['top_groups'], 'Email' ), 'Email still collapses to the channel.' );
+		$this->assertNotNull( $this->find_group( $sources['top_groups'], 'Direct' ) );
+
+		// The rows tool filters on the same channel names.
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$referral = \WooCommerce\CommerceAbilities\Abilities\AnalyticsRowsAbility::execute(
+			array(
+				'entity'  => 'orders',
+				'filters' => array(
+					array(
+						'field'    => 'attribution_channel',
+						'operator' => 'is',
+						'value'    => 'Referral',
+					),
+				),
+			) + $week
+		);
+		$this->assertIsArray( $referral, is_wp_error( $referral ) ? $referral->get_error_message() : '' );
+		$this->assertSame( 2, (int) $referral['summary']['matched_count'] );
+	}
+
+	/**
+	 * The other source types: tagged links by medium (whatever its case),
+	 * admin and mobile app orders, Point of Sale (whose stored label is
+	 * translated), unknown (no attribution), and a source type written in
+	 * capitals, as some seeders do.
+	 */
+	public function test_channel_for_other_source_types() {
+		$week = array(
+			'date_start' => '2025-11-10',
+			'date_end'   => '2025-11-16',
+		);
+		$this->seed_attributed_orders(
+			'2025-11-1',
+			0,
+			array(
+				array( 9, 'Source: instagram', 'utm', 'instagram', 'Social' ),
+				array( 8, 'Source: adnet', 'utm', 'adnet', 'display' ),
+				array( 7, 'Web admin', 'admin', 'Web admin', '' ),
+				array( 6, 'Mobile app', 'mobile_app', 'Woo', '' ),
+				array( 5, 'Point de vente', 'pos', 'pos', '' ),
+				array( 4, 'Inconnu', 'unknown', '', '' ),
+				array( 3, 'Referral', 'Referral', 'blogpost', '' ),
+			)
+		);
+
+		$channels = $this->run_ability( array( 'group_by' => 'channel' ) + $week );
+		$expected = array(
+			'Social'        => 9.00,
+			'Display'       => 8.00,
+			'Web admin'     => 7.00,
+			'Mobile app'    => 6.00,
+			'Point of Sale' => 5.00,
+			'(Unassigned)'  => 4.00,
+			'Referral'      => 3.00,
+		);
+		foreach ( $expected as $channel => $revenue ) {
+			$row = $this->find_group( $channels['top_groups'], $channel );
+			$this->assertNotNull( $row, "{$channel} should be a channel." );
+			$this->assertSame( $revenue, (float) $row['net_revenue'], $channel );
+		}
+		$this->assertNull( $this->find_group( $channels['top_groups'], 'Point de vente' ), 'A translated label is not a channel.' );
+		$this->assertNull( $this->find_group( $channels['top_groups'], 'Inconnu' ), 'An unknown source type is unassigned.' );
+
+		$sources = $this->run_ability( array( 'group_by' => 'channel_source' ) + $week );
+		$this->assertSame( 9.00, (float) $this->find_group( $sources['top_groups'], 'Social: instagram' )['net_revenue'] );
+		$this->assertNotNull( $this->find_group( $sources['top_groups'], 'Web admin' ), 'Web admin collapses to the channel.' );
+		$this->assertNotNull( $this->find_group( $sources['top_groups'], 'Point of Sale' ), 'Point of Sale collapses to the channel.' );
+		$this->assertSame( 3.00, (float) $this->find_group( $sources['top_groups'], 'Referral: blogpost' )['net_revenue'], 'A source type in capitals still matches.' );
+	}
+
+	/**
+	 * Seed paid orders as WooCommerce records their attribution, one a day.
+	 *
+	 * @param string $month_prefix Date up to the day's last digit ('2025-11-0').
+	 * @param int    $first_day    Last digit of the first day.
+	 * @param array  $orders       Rows of [ total, origin, source type, source, medium ('' for none) ].
+	 */
+	private function seed_attributed_orders( $month_prefix, $first_day, array $orders ) {
+		foreach ( $orders as $i => $order ) {
+			$attribution = array(
+				'channel'     => $order[1],
+				'source_type' => $order[2],
+				'source'      => $order[3],
+			);
+			if ( '' !== $order[4] ) {
+				$attribution['medium'] = $order[4];
+			}
+			$this->seed_paid_order(
+				array(
+					'customer_id' => $this->seed_customer(),
+					'total'       => $order[0],
+					'date'        => $month_prefix . ( $first_day + ( $i % 7 ) ) . ' 10:00:00',
+					'attribution' => $attribution,
+				)
+			);
+		}
+	}
+
+	/**
 	 * Setting include_unassigned=false excludes the (Unassigned)
 	 * top_groups row (E's no-meta order and F's source-less Direct
 	 * order for the source dimension). Totals are NOT filtered —

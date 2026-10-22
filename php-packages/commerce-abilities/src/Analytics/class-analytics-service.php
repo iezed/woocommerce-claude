@@ -2422,7 +2422,11 @@ class AnalyticsService {
 	 * Attribution dimension → meta_key map.
 	 *
 	 * Mirrors WC core's order attribution meta:
-	 *   channel  → _wc_order_attribution_origin     (Direct, Email, Organic Search, …)
+	 *   channel  → derived from _wc_order_attribution_source_type (and the medium
+	 *              for tagged links) by attribution_channel_sql(). The origin
+	 *              (_wc_order_attribution_origin) is only the fallback: WC writes
+	 *              it as a per-site label ("Referral: Facebook.com", "Source:
+	 *              woocommerce.com"), not a channel.
 	 *   source   → _wc_order_attribution_utm_source (google, facebook, klaviyo, …)
 	 *   campaign → _wc_order_attribution_utm_campaign
 	 *   device   → _wc_order_attribution_device_type (desktop, mobile, tablet)
@@ -2434,14 +2438,94 @@ class AnalyticsService {
 	 * @var array
 	 */
 	private static $attribution_meta_keys = array(
-		'channel'  => '_wc_order_attribution_origin',
-		'source'   => '_wc_order_attribution_utm_source',
-		'medium'   => '_wc_order_attribution_utm_medium',
-		'campaign' => '_wc_order_attribution_utm_campaign',
-		'term'     => '_wc_order_attribution_utm_term',
-		'content'  => '_wc_order_attribution_utm_content',
-		'device'   => '_wc_order_attribution_device_type',
+		'channel'     => '_wc_order_attribution_origin',
+		'source'      => '_wc_order_attribution_utm_source',
+		'medium'      => '_wc_order_attribution_utm_medium',
+		'campaign'    => '_wc_order_attribution_utm_campaign',
+		'term'        => '_wc_order_attribution_utm_term',
+		'content'     => '_wc_order_attribution_utm_content',
+		'device'      => '_wc_order_attribution_device_type',
+		// Joined for attribution_channel_sql(); not a group_by dimension of its own.
+		'source_type' => '_wc_order_attribution_source_type',
 	);
+
+	/**
+	 * Mediums of a tagged (utm) link and the channel each means. Anything else
+	 * tagged is "Tagged links".
+	 *
+	 * @var array
+	 */
+	private static $utm_medium_channels = array(
+		'Email'       => array( 'email', 'e-mail', 'newsletter' ),
+		'Paid Search' => array( 'cpc', 'ppc', 'paid', 'paidsearch', 'paid_search', 'paid-search', 'sem' ),
+		'Social'      => array( 'social', 'social-media', 'social_media', 'sm', 'paid_social', 'paid-social', 'paidsocial' ),
+		'Display'     => array( 'display', 'banner', 'cpm' ),
+		'Affiliates'  => array( 'affiliate', 'affiliates' ),
+		'Referral'    => array( 'referral' ),
+	);
+
+	/**
+	 * The channel an order came through, as a SQL expression over three meta
+	 * joins: the origin, the source type and the utm medium (each a LEFT JOIN
+	 * alias whose `meta_value` holds that meta).
+	 *
+	 * WooCommerce records a source type (typein, organic, referral, utm, admin,
+	 * mobile_app) and writes the origin as a per-site label ("Referral:
+	 * Facebook.com", "Source: woocommerce.com", "Organic: Google"), so grouping
+	 * by the origin gave one "channel" per site. The source type gives the
+	 * channel; a tagged link's medium refines it (email → Email, cpc → Paid
+	 * Search). An `unknown` source type is no attribution at all, so it lands
+	 * in Unassigned. Orders with no recognised source type fall back to the
+	 * origin, which is what stores and fixtures that write channel names there
+	 * expect. Source types are matched lowercased, so the result doesn't depend
+	 * on the meta table's collation.
+	 *
+	 * @param string $origin Alias of the _wc_order_attribution_origin join.
+	 * @param string $type   Alias of the _wc_order_attribution_source_type join.
+	 * @param string $medium Alias of the _wc_order_attribution_utm_medium join.
+	 * @return string
+	 */
+	public static function attribution_channel_sql( $origin, $type, $medium ) {
+		$tagged = '';
+		foreach ( self::$utm_medium_channels as $channel => $mediums ) {
+			$tagged .= " WHEN LOWER(COALESCE({$medium}.meta_value, '')) IN ('" . implode( "', '", $mediums ) . "') THEN '{$channel}'";
+		}
+		return "CASE LOWER(COALESCE({$type}.meta_value, ''))"
+			. " WHEN 'typein' THEN 'Direct'"
+			. " WHEN 'organic' THEN 'Organic Search'"
+			. " WHEN 'referral' THEN 'Referral'"
+			. " WHEN 'admin' THEN 'Web admin'"
+			. " WHEN 'mobile_app' THEN 'Mobile app'"
+			. " WHEN 'pos' THEN 'Point of Sale'"
+			. " WHEN 'unknown' THEN NULL"
+			. " WHEN 'utm' THEN CASE{$tagged} ELSE 'Tagged links' END"
+			. " ELSE {$origin}.meta_value END";
+	}
+
+	/**
+	 * LEFT JOINs to the attribution meta a grouping needs, with their meta_key
+	 * values for the prepared statement. Every dimension joins (channel_source
+	 * needs channel and source together), except the source type, which only
+	 * the channel needs.
+	 *
+	 * @param string $group_by Dimension being grouped by.
+	 * @param array  $source   Meta table and id column (get_order_meta_source()).
+	 * @param string $os_table Order stats table.
+	 * @return array{0: string, 1: array} JOIN SQL and its values.
+	 */
+	private static function attribution_meta_joins( $group_by, $source, $os_table ) {
+		$meta_joins  = '';
+		$join_values = array();
+		foreach ( self::$attribution_meta_keys as $alias_suffix => $meta_key ) {
+			if ( 'source_type' === $alias_suffix && ! in_array( $group_by, array( 'channel', 'channel_source' ), true ) ) {
+				continue;
+			}
+			$alias         = 'attr_' . $alias_suffix;
+			$meta_joins   .= " LEFT JOIN {$source['table']} {$alias} ON {$alias}.{$source['id_column']} = {$os_table}.order_id AND {$alias}.meta_key = %s";
+			$join_values[] = $meta_key;
+		}
+		return array( $meta_joins, $join_values );
+	}
 
 	/**
 	 * Channel values that never carry a distinct source — `channel_source`
@@ -2456,10 +2540,12 @@ class AnalyticsService {
 		'Direct',
 		'Display',
 		'Email',
+		'Mobile app',
 		'Mobile Push Notifications',
-		'Referral',
+		'Point of Sale',
 		'SMS',
 		'Unassigned',
+		'Web admin',
 	);
 
 	/**
@@ -2557,7 +2643,7 @@ class AnalyticsService {
 	private static function attribution_group_expr( $group_by ) {
 		switch ( $group_by ) {
 			case 'channel':
-				return 'attr_channel.meta_value';
+				return self::attribution_channel_sql( 'attr_channel', 'attr_source_type', 'attr_medium' );
 			case 'source':
 				return 'attr_source.meta_value';
 			case 'medium':
@@ -2579,9 +2665,12 @@ class AnalyticsService {
 					self::$channels_without_source
 				);
 				$list    = implode( ', ', $escaped );
-				return "CASE WHEN attr_source.meta_value IS NULL OR attr_source.meta_value = '' OR attr_channel.meta_value IN ( {$list} )"
-					. ' THEN attr_channel.meta_value'
-					. " ELSE CONCAT(attr_channel.meta_value, ': ', attr_source.meta_value) END";
+				// The channel, then ": source" unless there's no source or the
+				// channel never carries one (CONCAT with a NULL source gives
+				// NULL, which COALESCE turns into nothing), so the channel is
+				// written out twice rather than three times.
+				$channel = self::attribution_channel_sql( 'attr_channel', 'attr_source_type', 'attr_medium' );
+				return "CONCAT(({$channel}), COALESCE(CASE WHEN ({$channel}) IN ( {$list} ) THEN NULL ELSE CONCAT(': ', NULLIF(attr_source.meta_value, '')) END, ''))";
 			default:
 				return null;
 		}
@@ -2838,16 +2927,9 @@ class AnalyticsService {
 		}
 
 		// Build LEFT JOINs to attribution meta. Each dimension is its own join
-		// against the meta table with a specific meta_key filter. We always
-		// join all four dimensions because channel_source needs both channel
-		// and source; the query plan stays cheap thanks to the meta_key index.
-		$meta_joins  = '';
-		$join_values = array();
-		foreach ( self::$attribution_meta_keys as $alias_suffix => $meta_key ) {
-			$alias         = 'attr_' . $alias_suffix;
-			$meta_joins   .= " LEFT JOIN {$source['table']} {$alias} ON {$alias}.{$source['id_column']} = {$os_table}.order_id AND {$alias}.meta_key = %s";
-			$join_values[] = $meta_key;
-		}
+		// against the meta table with a specific meta_key filter; the query
+		// plan stays cheap thanks to the meta_key index.
+		list( $meta_joins, $join_values ) = self::attribution_meta_joins( $group_by, $source, $os_table );
 
 		// Whitelist orderby.
 		$orderby_map = array(
@@ -2982,13 +3064,7 @@ class AnalyticsService {
 			return self::empty_attribution_totals();
 		}
 
-		$meta_joins  = '';
-		$join_values = array();
-		foreach ( self::$attribution_meta_keys as $alias_suffix => $meta_key ) {
-			$alias         = 'attr_' . $alias_suffix;
-			$meta_joins   .= " LEFT JOIN {$source['table']} {$alias} ON {$alias}.{$source['id_column']} = {$os_table}.order_id AND {$alias}.meta_key = %s";
-			$join_values[] = $meta_key;
-		}
+		list( $meta_joins, $join_values ) = self::attribution_meta_joins( $group_by, $source, $os_table );
 
 		$os_report_range  = self::get_report_date_range_sql( $os_table . '.', $date_start, $date_end );
 		$admin_date_guard = self::get_admin_date_guard_sql( $os_table . '.' );
@@ -8293,13 +8369,16 @@ class AnalyticsService {
 
 			// ─── Attribution meta (via wc_orders_meta or postmeta, picked at run time) ───
 			// `channel` is the human-readable dimension (Organic Search, Direct,
-			// Email, Paid Search, Social, Referral) that WC derives from raw
-			// source_type. Matches get_attribution's group_by=channel vocabulary.
+			// Email, Paid Search, Social, Referral) derived from the raw
+			// source_type by attribution_channel_sql(). Matches
+			// get_attribution's group_by=channel vocabulary.
 			'attribution_channel'  => array(
-				'column'   => 'attr_channel.meta_value',
+				'column'   => self::attribution_channel_sql( 'attr_channel', 'attr_ch_type', 'attr_ch_medium' ),
 				'type'     => 'string',
-				'label'    => 'Attribution channel (Direct, Organic Search, Paid Search, Email, Social, Referral)',
-				'join'     => "LEFT JOIN {$mt} AS attr_channel ON os.order_id = attr_channel.{$mi} AND attr_channel.meta_key = '_wc_order_attribution_origin'",
+				'label'    => 'Attribution channel (Direct, Organic Search, Paid Search, Email, Social, Referral, Display, Affiliates, Tagged links, Web admin, Mobile app)',
+				'join'     => "LEFT JOIN {$mt} AS attr_channel ON os.order_id = attr_channel.{$mi} AND attr_channel.meta_key = '_wc_order_attribution_origin'"
+					. " LEFT JOIN {$mt} AS attr_ch_type ON os.order_id = attr_ch_type.{$mi} AND attr_ch_type.meta_key = '_wc_order_attribution_source_type'"
+					. " LEFT JOIN {$mt} AS attr_ch_medium ON os.order_id = attr_ch_medium.{$mi} AND attr_ch_medium.meta_key = '_wc_order_attribution_utm_medium'",
 				'join_key' => 'attr_channel',
 			),
 			'attribution_source'   => array(

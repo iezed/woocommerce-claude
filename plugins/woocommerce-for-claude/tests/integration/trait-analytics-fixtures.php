@@ -68,13 +68,14 @@ trait AnalyticsFixtures {
 	 * @var array<string,string>
 	 */
 	protected static $attribution_meta_key_map = array(
-		'channel'  => '_wc_order_attribution_origin',
-		'source'   => '_wc_order_attribution_utm_source',
-		'medium'   => '_wc_order_attribution_utm_medium',
-		'campaign' => '_wc_order_attribution_utm_campaign',
-		'term'     => '_wc_order_attribution_utm_term',
-		'content'  => '_wc_order_attribution_utm_content',
-		'device'   => '_wc_order_attribution_device_type',
+		'channel'     => '_wc_order_attribution_origin',
+		'source'      => '_wc_order_attribution_utm_source',
+		'medium'      => '_wc_order_attribution_utm_medium',
+		'campaign'    => '_wc_order_attribution_utm_campaign',
+		'term'        => '_wc_order_attribution_utm_term',
+		'content'     => '_wc_order_attribution_utm_content',
+		'device'      => '_wc_order_attribution_device_type',
+		'source_type' => '_wc_order_attribution_source_type',
 	);
 
 	/**

@@ -12,7 +12,10 @@ defined( 'ABSPATH' ) || exit;
 /**
  * Answers the briefing's calls on one REST route,
  * `/wp-json/briefing-for-woocommerce/call`, authenticated by the read-only key
- * the merchant approved on WooCommerce's own screen.
+ * the merchant approved on WooCommerce's own screen. A second route,
+ * `/wp-json/briefing-for-woocommerce/tools`, behind the same key, lists the
+ * tools with their descriptions and input schemas, so the app can offer them
+ * to the AI as this release defines them.
  *
  * Up to 0.3.0 this was an MCP server on the MCP adapter WooCommerce bundled.
  * WooCommerce 11.3 stops bundling it, and the briefing only ever makes a fixed
@@ -26,6 +29,7 @@ class Plugin {
 	 */
 	const REST_NAMESPACE = 'briefing-for-woocommerce';
 	const REST_ROUTE     = 'call';
+	const TOOLS_ROUTE    = 'tools';
 
 	/**
 	 * Most calls one request may carry. The briefing's weekly read is nine.
@@ -99,6 +103,45 @@ class Plugin {
 						),
 					),
 				),
+			)
+		);
+
+		register_rest_route(
+			self::REST_NAMESPACE,
+			'/' . self::TOOLS_ROUTE,
+			array(
+				'methods'             => 'GET',
+				'callback'            => array( $this, 'tools' ),
+				'permission_callback' => array( $this, 'authenticate_request' ),
+			)
+		);
+	}
+
+	/**
+	 * List the tools the route runs: `{ version, tools: [ { name, label,
+	 * description, input_schema } ] }`, named as calls name them
+	 * (`briefing-totals`).
+	 *
+	 * @return \WP_REST_Response
+	 */
+	public function tools() {
+		$tools = array();
+		foreach ( Abilities::TOOLS as $name ) {
+			$ability = function_exists( 'wp_get_ability' ) ? wp_get_ability( $name ) : null;
+			if ( ! $ability ) {
+				continue;
+			}
+			$tools[] = array(
+				'name'         => str_replace( 'briefing/', 'briefing-', $name ),
+				'label'        => $ability->get_label(),
+				'description'  => $ability->get_description(),
+				'input_schema' => $ability->get_input_schema(),
+			);
+		}
+		return rest_ensure_response(
+			array(
+				'version' => BRIEFING_FOR_WOOCOMMERCE_VERSION,
+				'tools'   => $tools,
 			)
 		);
 	}
@@ -271,14 +314,15 @@ class Plugin {
 	}
 
 	/**
-	 * Don't run application-password auth on our route (see the constructor).
-	 * Only the route itself, so no other route under the namespace loses it.
+	 * Don't run application-password auth on our routes (see the constructor).
+	 * Only those routes, so no other route under the namespace loses it.
 	 *
 	 * @param bool $is_api_request What WP would otherwise consider this request.
 	 * @return bool
 	 */
 	public function exclude_route_from_app_password_auth( $is_api_request ) {
-		if ( $is_api_request && self::REST_NAMESPACE . '/' . self::REST_ROUTE === rtrim( self::current_rest_route(), '/' ) ) {
+		$route = rtrim( self::current_rest_route(), '/' );
+		if ( $is_api_request && in_array( $route, array( self::REST_NAMESPACE . '/' . self::REST_ROUTE, self::REST_NAMESPACE . '/' . self::TOOLS_ROUTE ), true ) ) {
 			return false;
 		}
 		return $is_api_request;

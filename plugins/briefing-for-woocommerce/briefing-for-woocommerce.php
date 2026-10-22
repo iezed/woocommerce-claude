@@ -2,8 +2,8 @@
 /**
  * Plugin Name: Briefing for WooCommerce
  * Plugin URI: https://briefing.woocommerce.com/
- * Description: Lets Briefing for WooCommerce read your store's weekly totals, with a read-only key you approve. Only totals and breakdowns ever leave the store — never orders, customers, names or emails.
- * Version: 0.4.0
+ * Description: Lets Briefing for WooCommerce read your store's figures, orders and catalogue, with a read-only key you approve. Never a customer's name, email, phone number or address.
+ * Version: 0.5.0
  * Author: Automattic
  * Author URI: https://automattic.com/
  * Text Domain: briefing-for-woocommerce
@@ -22,7 +22,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'BRIEFING_FOR_WOOCOMMERCE_VERSION', '0.4.0' );
+define( 'BRIEFING_FOR_WOOCOMMERCE_VERSION', '0.5.0' );
 define( 'BRIEFING_FOR_WOOCOMMERCE_PLUGIN_FILE', __FILE__ );
 define( 'BRIEFING_FOR_WOOCOMMERCE_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 
@@ -36,8 +36,8 @@ register_activation_hook( __FILE__, array( \WooCommerce\Briefing\Updater::class,
 /**
  * Load the shared commerce-abilities classes the briefing reads through.
  *
- * Only the analytics services and the verb-shaped abilities it calls are
- * loaded; the package's Loader is not initialised, so this plugin registers no
+ * Only the analytics services, the verb-shaped abilities, and the store
+ * knowledge and readiness scoring it calls are loaded; the package's Loader is not initialised, so this plugin registers no
  * `wc-analytics/*` abilities of its own. Classes another plugin (WooCommerce for
  * Claude, Hey Woo) has already loaded are skipped, so the plugins can run side
  * by side. Same loading approach as WooCommerce for Claude: Composer's
@@ -57,10 +57,22 @@ function briefing_for_woocommerce_load_commerce_abilities() {
 		\WooCommerce\CommerceAbilities\Abilities\AnalyticsRowsAbility::class => 'Abilities/class-analytics-rows-ability.php',
 		\WooCommerce\CommerceAbilities\Analytics\AnalyticsService::class => 'Analytics/class-analytics-service.php',
 		\WooCommerce\CommerceAbilities\Analytics\InsightsService::class => 'Analytics/class-insights-service.php',
+		\WooCommerce\CommerceAbilities\Knowledge\KnowledgeProvider::class => 'Knowledge/interface-knowledge-provider.php',
+		\WooCommerce\CommerceAbilities\Knowledge\KnowledgeRegistry::class => 'Knowledge/class-knowledge-registry.php',
+		\WooCommerce\CommerceAbilities\Knowledge\Providers\StoreProfileProvider::class => 'Knowledge/providers/class-store-profile-provider.php',
+		\WooCommerce\CommerceAbilities\Knowledge\Providers\CatalogProvider::class => 'Knowledge/providers/class-catalog-provider.php',
+		\WooCommerce\CommerceAbilities\Knowledge\Providers\ProductProvider::class => 'Knowledge/providers/class-product-provider.php',
+		\WooCommerce\CommerceAbilities\Knowledge\Providers\PolicyProvider::class => 'Knowledge/providers/class-policy-provider.php',
+		\WooCommerce\CommerceAbilities\Scoring\Factors\ProductCompleteness::class => 'Scoring/factors/class-product-completeness.php',
+		\WooCommerce\CommerceAbilities\Scoring\Factors\SchemaCoverage::class => 'Scoring/factors/class-schema-coverage.php',
+		\WooCommerce\CommerceAbilities\Scoring\Factors\PolicyCompleteness::class => 'Scoring/factors/class-policy-completeness.php',
+		\WooCommerce\CommerceAbilities\Scoring\Factors\ContentQuality::class => 'Scoring/factors/class-content-quality.php',
+		\WooCommerce\CommerceAbilities\Scoring\ScoringEngine::class => 'Scoring/class-scoring-engine.php',
+		\WooCommerce\CommerceAbilities\Store\StoreKnowledge::class => 'Store/class-store-knowledge.php',
 	);
 
 	foreach ( $classes as $class_name => $relative_path ) {
-		if ( class_exists( $class_name, false ) ) {
+		if ( class_exists( $class_name, false ) || interface_exists( $class_name, false ) ) {
 			continue;
 		}
 		foreach ( $package_dirs as $package_dir ) {

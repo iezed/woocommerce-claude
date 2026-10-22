@@ -1,7 +1,7 @@
 <?php
 /**
- * Briefing for WooCommerce: its REST route, key check, and the promise on its
- * landing page — "We read totals. Never people."
+ * Briefing for WooCommerce: its REST routes, key check, and the promise on its
+ * landing page — never a customer's name, email, phone number or address.
  *
  * Runs alongside WooCommerce for Claude (both are loaded by the bootstrap), so
  * it also covers the two plugins sharing one store and one commerce-abilities
@@ -75,6 +75,7 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 		$this->assertArrayHasKey( '/briefing-for-woocommerce', $routes );
 		$this->assertArrayNotHasKey( '/briefing-for-woocommerce/mcp', $routes );
 		$this->assertSame( array( 'POST' => true ), $routes['/briefing-for-woocommerce/call'][0]['methods'] );
+		$this->assertSame( array( 'GET' => true ), $routes['/briefing-for-woocommerce/tools'][0]['methods'] );
 
 		// Kept off any MCP adapter's default server, now the plugin no longer
 		// switches that server off.
@@ -86,7 +87,7 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 	/**
 	 * Calls run in order with a read key, one result each: data for the
 	 * briefing's tools, the ability's own error code when it refuses, and
-	 * unknown_tool for anything that isn't one of the six.
+	 * unknown_tool for anything that isn't one of them.
 	 */
 	public function test_route_runs_calls_in_order() {
 		$admin = self::factory()->user->create( array( 'role' => 'administrator' ) );
@@ -380,22 +381,23 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 	}
 
 	/**
-	 * Orders and customers are aggregate-only on the rows tool; products can be
-	 * listed.
+	 * The rows tool lists orders, customers and products, customers only as
+	 * Customer #N, and caps lists at ROWS_MAX_LIMIT.
 	 */
-	public function test_rows_lists_products_only() {
+	public function test_rows_lists_orders_customers_and_products() {
 		$product = $this->seed_simple_product(
 			array(
 				'name'  => 'Listed mug',
 				'price' => 10,
 			)
 		);
-		$this->seed_paid_order(
+		$order   = $this->seed_paid_order(
 			array(
-				'customer_id' => $this->seed_customer(),
-				'total'       => 0,
-				'date'        => $this->days_ago( 2 ) . ' 12:00:00',
-				'items'       => array(
+				'customer_id'   => $this->seed_customer( 'listed@example.test' ),
+				'total'         => 0,
+				'date'          => $this->days_ago( 2 ) . ' 12:00:00',
+				'billing_email' => 'listed@example.test',
+				'items'         => array(
 					array(
 						'product_id' => $product,
 						'qty'        => 1,
@@ -406,21 +408,26 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
 		$recent = $this->recent_range( 7 );
 
-		foreach ( array( 'orders', 'customers' ) as $entity ) {
-			$result = wp_get_ability( Abilities::ROWS )->execute(
-				array(
-					'entity' => $entity,
-					'mode'   => 'rows',
-				) + $recent
-			);
-			$this->assertWPError( $result, $entity );
-			$this->assertSame( 'briefing_rows_aggregate_only', $result->get_error_code(), $entity );
+		$orders = wp_get_ability( Abilities::ROWS )->execute(
+			array(
+				'entity' => 'orders',
+				'mode'   => 'rows',
+			) + $recent
+		);
+		$this->assertIsArray( $orders, is_wp_error( $orders ) ? $orders->get_error_message() : '' );
+		$this->assertContains( (int) ( is_object( $order ) ? $order->get_id() : $order ), array_map( 'intval', wp_list_pluck( $orders['rows'], 'order_id' ) ) );
+		$this->assertStringStartsWith( 'Customer #', $orders['rows'][0]['customer_id_pseudo'] );
+		$this->assert_no_people( $orders, 'order rows' );
 
-			$aggregate = wp_get_ability( Abilities::ROWS )->execute( array( 'entity' => $entity ) + $recent );
-			$this->assertIsArray( $aggregate, is_wp_error( $aggregate ) ? $aggregate->get_error_message() : $entity );
-			$this->assertSame( 'aggregate', $aggregate['mode'] );
-			$this->assertNull( $aggregate['rows'], $entity );
-		}
+		$customers = wp_get_ability( Abilities::ROWS )->execute(
+			array(
+				'entity' => 'customers',
+				'mode'   => 'rows',
+			) + $recent
+		);
+		$this->assertIsArray( $customers, is_wp_error( $customers ) ? $customers->get_error_message() : '' );
+		$this->assertNotEmpty( $customers['rows'] );
+		$this->assert_no_people( $customers, 'customer rows' );
 
 		$products = wp_get_ability( Abilities::ROWS )->execute(
 			array(
@@ -513,55 +520,6 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 	}
 
 	/**
-	 * A filter matching fewer than three orders or customers gives the count
-	 * alone; three or more give the sums.
-	 */
-	public function test_rows_withholds_sums_for_small_groups() {
-		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
-		$germany = array(
-			'entity'  => 'orders',
-			'filters' => array(
-				array(
-					'field'    => 'billing_country',
-					'operator' => 'is',
-					'value'    => 'DE',
-				),
-			),
-		) + $this->recent_range( 7 );
-
-		for ( $i = 0; $i < 2; $i++ ) {
-			$this->seed_paid_order(
-				array(
-					'customer_id'     => $this->seed_customer(),
-					'total'           => 150 + $i,
-					'date'            => $this->days_ago( 1 ) . ' 10:00:00',
-					'billing_country' => 'DE',
-				)
-			);
-		}
-		$small = wp_get_ability( Abilities::ROWS )->execute( $germany );
-		$this->assertIsArray( $small, is_wp_error( $small ) ? $small->get_error_message() : '' );
-		$this->assertSame( array( 'matched_count' => 2 ), $small['summary'] );
-		$this->assertArrayNotHasKey( 'share_of_revenue_percent', $small['share_of_universe'] );
-		$this->assertNull( $small['pipeline'] );
-		$this->assertNull( $small['admin_equivalent'] );
-		$this->assertStringNotContainsString( '150', wp_json_encode( $small['summary'] ) );
-
-		$this->seed_paid_order(
-			array(
-				'customer_id'     => $this->seed_customer(),
-				'total'           => 152,
-				'date'            => $this->days_ago( 1 ) . ' 11:00:00',
-				'billing_country' => 'DE',
-			)
-		);
-		$this->flush_analytics_cache();
-		$enough = wp_get_ability( Abilities::ROWS )->execute( $germany );
-		$this->assertSame( 3, $enough['summary']['matched_count'] );
-		$this->assertEqualsWithDelta( 453.0, $enough['summary']['net_revenue'], 0.01 );
-	}
-
-	/**
 	 * The new totals come through the Briefing tools unchanged apart from
 	 * person keys, and a guest's email never leaves the concentration query.
 	 */
@@ -596,9 +554,9 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 		$ours = wp_get_ability( Abilities::TOTALS )->execute( array( 'subject' => 'customer_concentration' ) + $week );
 		$this->assertIsArray( $ours, is_wp_error( $ours ) ? $ours->get_error_message() : '' );
 		$this->assertSame( 2, $ours['metrics']['customers_count'] );
-		$this->assertNull( $ours['metrics']['top_20_percent_share_percent'], 'Two customers: shares would describe each of them.' );
+		$this->assertSame( 90.9, $ours['metrics']['top_20_percent_share_percent'] );
 		$this->assertStringNotContainsString( 'big.spender', strtolower( wp_json_encode( $ours ) ) );
-		$this->assertSame( Abilities::without_people( Abilities::concentration_without_small_groups( $shared ) ), $ours );
+		$this->assertSame( Abilities::without_people( $shared ), $ours );
 
 		$cohorts = wp_get_ability( Abilities::BREAKDOWN )->execute(
 			array(
@@ -608,192 +566,6 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 		);
 		$this->assertIsArray( $cohorts, is_wp_error( $cohorts ) ? $cohorts->get_error_message() : '' );
 		$this->assertSame( 'cohorts', $cohorts['subject'] );
-	}
-
-	/**
-	 * Concentration figures that would describe fewer than three customers are
-	 * null: the spend figures with that few customers, the top fifth when it's
-	 * that few, and the top 10 when the rest are.
-	 */
-	public function test_concentration_withholds_small_groups() {
-		$metrics = function ( $count, $top_10, $top_fifth ) {
-			return array(
-				'customers_count'                => $count,
-				'revenue'                        => 1000.0,
-				'avg_spend_per_customer'         => 10.0,
-				'median_spend_per_customer'      => 10.0,
-				'top_10_customers_count'         => $top_10,
-				'top_10_revenue'                 => 900.0,
-				'top_10_share_percent'           => 90.0,
-				'top_20_percent_customers_count' => $top_fifth,
-				'top_20_percent_revenue'         => 500.0,
-				'top_20_percent_share_percent'   => 50.0,
-			);
-		};
-
-		$two = Abilities::concentration_without_small_groups( array( 'metrics' => $metrics( 2, 2, 1 ) ) );
-		$this->assertSame( 1000.0, $two['metrics']['revenue'], 'The period\'s revenue is a store total and stays.' );
-		foreach ( array( 'avg_spend_per_customer', 'median_spend_per_customer', 'top_10_revenue', 'top_20_percent_revenue', 'top_20_percent_share_percent' ) as $key ) {
-			$this->assertNull( $two['metrics'][ $key ], $key );
-		}
-		$this->assertStringContainsString( 'fewer than 3', $two['note'] );
-
-		$five = Abilities::concentration_without_small_groups( array( 'metrics' => $metrics( 5, 5, 1 ) ) );
-		$this->assertSame( 10.0, $five['metrics']['median_spend_per_customer'] );
-		$this->assertSame( 900.0, $five['metrics']['top_10_revenue'], 'With 5 customers the top 10 is everyone.' );
-		$this->assertNull( $five['metrics']['top_20_percent_revenue'], 'The top fifth of 5 is one customer.' );
-
-		$twelve = Abilities::concentration_without_small_groups(
-			array(
-				'metrics'    => $metrics( 12, 10, 3 ),
-				'comparison' => array(
-					'metrics' => $metrics( 20, 10, 4 ),
-					'changes' => array(
-						'top_10_share_percent'         => array( 'difference' => 1.0 ),
-						'top_20_percent_share_percent' => array( 'difference' => 1.0 ),
-					),
-				),
-			)
-		);
-		$this->assertNull( $twelve['metrics']['top_10_revenue'], 'Revenue less the top 10 would be the other two customers.' );
-		$this->assertSame( 500.0, $twelve['metrics']['top_20_percent_revenue'] );
-		$this->assertSame( 900.0, $twelve['comparison']['metrics']['top_10_revenue'] );
-		$this->assertNull( $twelve['comparison']['changes']['top_10_share_percent'], 'A change against a withheld figure goes too.' );
-		$this->assertSame( array( 'difference' => 1.0 ), $twelve['comparison']['changes']['top_20_percent_share_percent'] );
-
-		$this->assertArrayNotHasKey( 'note', Abilities::concentration_without_small_groups( array( 'metrics' => $metrics( 20, 10, 4 ) ) ) );
-	}
-
-	/**
-	 * Cohorts of fewer than three customers keep their count but not their
-	 * repeat or lifetime figures, and neither do the totals when the customers
-	 * outside the listed cohorts are that few.
-	 */
-	public function test_cohorts_withhold_small_groups() {
-		$cohort = function ( $key, $customers ) {
-			return array(
-				'key'                 => $key,
-				'customers_count'     => $customers,
-				'repeat_customers'    => 1,
-				'repeat_rate_percent' => 20.0,
-				'avg_lifetime_spend'  => 75.0,
-				'avg_lifetime_orders' => 1.5,
-			);
-		};
-		$result = function ( $size, array $groups ) {
-			return array(
-				'totals'     => array(
-					'customers_count'     => $size,
-					'repeat_customers'    => 2,
-					'repeat_rate_percent' => 25.0,
-					'avg_lifetime_spend'  => 80.0,
-					'avg_lifetime_orders' => 1.4,
-				),
-				'top_groups' => $groups,
-			);
-		};
-
-		$small = Abilities::cohorts_without_small_groups( $result( 6, array( $cohort( 'Direct', 5 ), $cohort( 'personal-code', 1 ) ) ) );
-		$this->assertSame( 75.0, $small['top_groups'][0]['avg_lifetime_spend'] );
-		$this->assertSame( 1, $small['top_groups'][1]['customers_count'] );
-		$this->assertNull( $small['top_groups'][1]['avg_lifetime_spend'] );
-		$this->assertNull( $small['top_groups'][1]['repeat_rate_percent'] );
-		$this->assertNull( $small['totals']['avg_lifetime_spend'], 'The totals less Direct would be the one customer.' );
-		$this->assertSame( 6, $small['totals']['customers_count'] );
-
-		$unlisted = Abilities::cohorts_without_small_groups( $result( 7, array( $cohort( 'Direct', 5 ) ) ) );
-		$this->assertNull( $unlisted['totals']['avg_lifetime_spend'], 'Two customers sit outside the listed cohorts.' );
-
-		$enough = Abilities::cohorts_without_small_groups( $result( 8, array( $cohort( 'Direct', 5 ), $cohort( 'Email', 3 ) ) ) );
-		$this->assertSame( 80.0, $enough['totals']['avg_lifetime_spend'] );
-		$this->assertSame( 75.0, $enough['top_groups'][1]['avg_lifetime_spend'] );
-		$this->assertArrayNotHasKey( 'note', $enough );
-	}
-
-	/**
-	 * A filter that leaves fewer than three orders out of the period gives the
-	 * count alone too: its sums, taken from the universe the same response
-	 * carries, would give the orders left out.
-	 */
-	public function test_rows_withholds_sums_when_few_are_left_out() {
-		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
-		$germany = array(
-			'entity'  => 'orders',
-			'filters' => array(
-				array(
-					'field'    => 'billing_country',
-					'operator' => 'is',
-					'value'    => 'DE',
-				),
-			),
-		) + $this->recent_range( 7 );
-
-		foreach ( array( 'DE', 'DE', 'DE', 'FR' ) as $i => $country ) {
-			$this->seed_paid_order(
-				array(
-					'customer_id'     => $this->seed_customer(),
-					'total'           => 100 + $i,
-					'date'            => $this->days_ago( 1 ) . ' 10:00:00',
-					'billing_country' => $country,
-				)
-			);
-		}
-		$one_left_out = wp_get_ability( Abilities::ROWS )->execute( $germany );
-		$this->assertIsArray( $one_left_out, is_wp_error( $one_left_out ) ? $one_left_out->get_error_message() : '' );
-		$this->assertSame( array( 'matched_count' => 3 ), $one_left_out['summary'] );
-		$this->assertArrayNotHasKey( 'share_of_revenue_percent', $one_left_out['share_of_universe'] );
-
-		foreach ( array( 1, 2 ) as $i ) {
-			$this->seed_paid_order(
-				array(
-					'customer_id'     => $this->seed_customer(),
-					'total'           => 110 + $i,
-					'date'            => $this->days_ago( 1 ) . ' 11:00:00',
-					'billing_country' => 'FR',
-				)
-			);
-		}
-		$this->flush_analytics_cache();
-		$three_left_out = wp_get_ability( Abilities::ROWS )->execute( $germany );
-		$this->assertEqualsWithDelta( 303.0, $three_left_out['summary']['net_revenue'], 0.01 );
-	}
-
-	/**
-	 * The pipeline and dashboard-matching blocks drop to counts when they, or
-	 * what they add to the summary, are one or two orders.
-	 */
-	public function test_rows_withholds_sibling_sums_that_subtract_to_one_order() {
-		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
-		$germany = array(
-			'entity'  => 'orders',
-			'filters' => array(
-				array(
-					'field'    => 'billing_country',
-					'operator' => 'is',
-					'value'    => 'DE',
-				),
-			),
-		) + $this->recent_range( 7 );
-
-		foreach ( array( 'completed', 'completed', 'completed', 'refunded', 'on-hold' ) as $i => $status ) {
-			$this->seed_paid_order(
-				array(
-					'customer_id'     => $this->seed_customer(),
-					'total'           => 200 + $i,
-					'status'          => $status,
-					'date'            => $this->days_ago( 1 ) . ' 10:00:00',
-					'billing_country' => 'DE',
-				)
-			);
-		}
-		$result = wp_get_ability( Abilities::ROWS )->execute( $germany );
-		$this->assertIsArray( $result, is_wp_error( $result ) ? $result->get_error_message() : '' );
-		$this->assertSame( 3, $result['summary']['matched_count'] );
-		$this->assertArrayHasKey( 'net_revenue', $result['summary'], 'Three paid orders, none left out: sums stay.' );
-		$this->assertSame( array( 'matched_count' => 1 ), $result['pipeline'], 'One on-hold order: count only.' );
-		$this->assertSame( array( 'matched_count' ), array_keys( $result['admin_equivalent'] ), 'Less the summary, it is one refunded order: count only.' );
-		$this->assertStringNotContainsString( '203', wp_json_encode( $result ) );
-		$this->assertStringNotContainsString( '204', wp_json_encode( $result ) );
 	}
 
 	/**
@@ -890,6 +662,84 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 				$this->assert_no_people( $result['data'], "route {$label}" );
 			}
 		}
+	}
+
+	/**
+	 * The tools route lists every tool the call route runs, named as calls name
+	 * them, with its description and input schema, behind the same key check.
+	 */
+	public function test_tools_route_lists_every_tool() {
+		$refused = rest_get_server()->dispatch( new WP_REST_Request( 'GET', '/briefing-for-woocommerce/tools' ) );
+		$this->assertContains( $refused->get_status(), array( 401, 403 ), 'No key, no list.' );
+
+		$admin = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		$this->set_basic_auth( $this->insert_key( $admin, 'read' ) );
+		$response = rest_get_server()->dispatch( new WP_REST_Request( 'GET', '/briefing-for-woocommerce/tools' ) );
+		$this->assertSame( 200, $response->get_status() );
+		$data = $response->get_data();
+		$this->assertSame( BRIEFING_FOR_WOOCOMMERCE_VERSION, $data['version'] );
+		$this->assertSame(
+			array_map(
+				function ( $name ) {
+					return str_replace( 'briefing/', 'briefing-', $name );
+				},
+				Abilities::TOOLS
+			),
+			wp_list_pluck( $data['tools'], 'name' )
+		);
+		foreach ( $data['tools'] as $tool ) {
+			$this->assertNotEmpty( $tool['description'], $tool['name'] );
+			$this->assertSame( 'object', $tool['input_schema']['type'], $tool['name'] );
+		}
+	}
+
+	/**
+	 * The catalogue tools read the store's categories and products: the
+	 * catalogue gives category slugs, search filters by one, and details and
+	 * readiness answer.
+	 */
+	public function test_catalogue_tools() {
+		$category = wp_insert_term( 'Men', 'product_cat', array( 'slug' => 'men' ) );
+		$product  = $this->seed_simple_product(
+			array(
+				'name'  => 'Wool sweater',
+				'price' => 60,
+			)
+		);
+		wp_set_object_terms( $product, array( (int) $category['term_id'] ), 'product_cat' );
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+
+		$catalog = wp_get_ability( Abilities::CATALOG )->execute( array() );
+		$this->assertIsArray( $catalog, is_wp_error( $catalog ) ? $catalog->get_error_message() : '' );
+		$this->assertContains( 'men', wp_list_pluck( $catalog['categories'], 'slug' ) );
+
+		$found = wp_get_ability( Abilities::SEARCH_PRODUCTS )->execute( array( 'category' => 'men' ) );
+		$this->assertIsArray( $found, is_wp_error( $found ) ? $found->get_error_message() : '' );
+		$this->assertContains( $product, array_map( 'intval', wp_list_pluck( $found['products'], 'id' ) ) );
+
+		$details = wp_get_ability( Abilities::PRODUCT_DETAILS )->execute( array( 'product_id' => $product ) );
+		$this->assertIsArray( $details, is_wp_error( $details ) ? $details->get_error_message() : '' );
+		$this->assertStringContainsString( 'Wool sweater', wp_json_encode( $details ) );
+
+		$score = wp_get_ability( Abilities::READINESS_SCORE )->execute( array() );
+		$this->assertIsArray( $score, is_wp_error( $score ) ? $score->get_error_message() : '' );
+
+		// The rows tool sells by the same slug.
+		$rows = wp_get_ability( Abilities::ROWS )->execute(
+			array(
+				'entity'  => 'products',
+				'mode'    => 'rows',
+				'filters' => array(
+					array(
+						'field'    => 'category',
+						'operator' => 'is',
+						'value'    => 'men',
+					),
+				),
+			) + $this->recent_range( 7 )
+		);
+		$this->assertIsArray( $rows, is_wp_error( $rows ) ? $rows->get_error_message() : '' );
+		$this->assertSame( array( $product ), array_map( 'intval', wp_list_pluck( $rows['rows'], 'product_id' ) ) );
 	}
 
 	/**
@@ -993,7 +843,7 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 	public function test_app_password_auth_skipped_for_our_route_only() {
 		$plugin = Plugin::instance();
 
-		foreach ( array( '/wp-json/briefing-for-woocommerce/call', '/wp-json/briefing-for-woocommerce/call/', '/wp-json/briefing-for-woocommerce/call?x=1' ) as $uri ) {
+		foreach ( array( '/wp-json/briefing-for-woocommerce/call', '/wp-json/briefing-for-woocommerce/call/', '/wp-json/briefing-for-woocommerce/call?x=1', '/wp-json/briefing-for-woocommerce/tools' ) as $uri ) {
 			$_SERVER['REQUEST_URI'] = $uri;
 			$this->assertFalse( $plugin->exclude_route_from_app_password_auth( true ), $uri );
 		}
@@ -1161,21 +1011,28 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 		foreach ( array( 'orders', 'customers', 'products' ) as $entity ) {
 			$calls[ "rows {$entity}" ] = array( Abilities::ROWS, array( 'entity' => $entity ) + $week );
 		}
-		$calls['rows products listed'] = array(
-			Abilities::ROWS,
-			array(
-				'entity' => 'products',
-				'mode'   => 'rows',
-			) + $week,
-		);
+		foreach ( array( 'orders', 'customers', 'products' ) as $entity ) {
+			$calls[ "rows {$entity} listed" ] = array(
+				Abilities::ROWS,
+				array(
+					'entity' => $entity,
+					'mode'   => 'rows',
+				) + $week,
+			);
+		}
 		$calls['stock at risk']        = array( Abilities::STOCK_AT_RISK, array( 'kind' => 'low' ) + $week );
 		$calls['store profile']        = array( Abilities::STORE_PROFILE, array() );
+		$calls['catalogue']            = array( Abilities::CATALOG, array() );
+		$calls['search products']      = array( Abilities::SEARCH_PRODUCTS, array( 'query' => 'mug' ) );
+		$calls['readiness score']      = array( Abilities::READINESS_SCORE, array() );
+		$calls['recommendations']      = array( Abilities::RECOMMENDATIONS, array() );
+		$calls['suggest improvements'] = array( Abilities::SUGGEST_IMPROVEMENTS, array() );
 		return $calls;
 	}
 
 	/**
-	 * Assert a tool result has no person key at any depth, no email address and
-	 * no pseudonymised customer label.
+	 * Assert a tool result has no person key at any depth and no email address.
+	 * Customers may appear as Customer #N, never by name.
 	 *
 	 * @param mixed  $value Tool result.
 	 * @param string $label What was called.
@@ -1183,7 +1040,6 @@ class Test_Briefing_For_WooCommerce extends WP_UnitTestCase {
 	private function assert_no_people( $value, $label ) {
 		$json = wp_json_encode( $value );
 		$this->assertDoesNotMatchRegularExpression( '/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/', $json, "{$label}: email address" );
-		$this->assertStringNotContainsString( 'Customer #', $json, "{$label}: customer label" );
 		$this->assertSame( array(), $this->person_keys_in( $value ), "{$label}: person keys" );
 	}
 

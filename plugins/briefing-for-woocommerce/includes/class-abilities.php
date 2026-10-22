@@ -11,6 +11,7 @@ use WooCommerce\CommerceAbilities\Abilities\AnalyticsBreakdownAbility;
 use WooCommerce\CommerceAbilities\Abilities\AnalyticsRowsAbility;
 use WooCommerce\CommerceAbilities\Abilities\AnalyticsSeriesAbility;
 use WooCommerce\CommerceAbilities\Abilities\AnalyticsTotalsAbility;
+use WooCommerce\CommerceAbilities\Store\StoreKnowledge;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -18,12 +19,13 @@ defined( 'ABSPATH' ) || exit;
  * Everything Briefing for WooCommerce can read from a store.
  *
  * The analytics tools wrap the shared `wc-analytics/*` implementations with
- * narrower inputs, and take out anything about an individual person on the way
- * back (the totals tool's pseudonymised top customers, for one). The rows tool
- * wraps the shared rows tool but only lists products: orders and customers come
- * back as counts and sums, and a filter that matches (or leaves out) fewer
- * than MIN_GROUP of them returns the count alone. Store profile returns only
- * the six facts the briefing uses.
+ * narrower inputs, and take out anything that names or contacts a person on
+ * the way back (the totals tool's top-customer list, for one). The rows tool
+ * wraps the shared rows tool: it lists orders, products and customers (as
+ * `Customer #N`, never a name), with its dates capped and no filter that
+ * points at one person. The catalogue tools wrap the same store knowledge and
+ * readiness scoring WooCommerce for Claude and Hey Woo use. Store profile
+ * returns only the six facts the briefing uses.
  */
 class Abilities {
 
@@ -36,10 +38,23 @@ class Abilities {
 	const STOCK_AT_RISK = 'briefing/stock-at-risk';
 	const ROWS          = 'briefing/rows';
 
+	const CATALOG              = 'briefing/catalog';
+	const SEARCH_PRODUCTS      = 'briefing/search-products';
+	const PRODUCT_DETAILS      = 'briefing/product-details';
+	const READINESS_SCORE      = 'briefing/readiness-score';
+	const RECOMMENDATIONS      = 'briefing/recommendations';
+	const SUGGEST_IMPROVEMENTS = 'briefing/suggest-improvements';
+
 	/**
 	 * The tools the route runs, and nothing else.
 	 */
-	const TOOLS = array( self::TOTALS, self::BREAKDOWN, self::SERIES, self::STORE_PROFILE, self::STOCK_AT_RISK, self::ROWS );
+	const TOOLS = array( self::TOTALS, self::BREAKDOWN, self::SERIES, self::STORE_PROFILE, self::STOCK_AT_RISK, self::ROWS, self::CATALOG, self::SEARCH_PRODUCTS, self::PRODUCT_DETAILS, self::READINESS_SCORE, self::RECOMMENDATIONS, self::SUGGEST_IMPROVEMENTS );
+
+	/**
+	 * The store knowledge consumer the catalogue tools read as, so their
+	 * registry and filters stay apart from WooCommerce for Claude's and Hey Woo's.
+	 */
+	const KNOWLEDGE_CONSUMER = 'briefing-for-woocommerce';
 
 	/**
 	 * The rows tool has no large-range gate, so the plugin caps its dates: a
@@ -50,17 +65,9 @@ class Abilities {
 	const ROWS_MAX_YEARS_BACK = 3;
 
 	/**
-	 * Most product rows the rows tool lists.
+	 * Most rows the rows tool lists, as WooCommerce for Claude's.
 	 */
-	const ROWS_MAX_LIMIT = 25;
-
-	/**
-	 * Fewest orders or customers a rows-tool aggregate reports sums for. A
-	 * filter matching fewer, or leaving fewer out of a total the same response
-	 * carries, returns the count alone, so one response can't be subtracted
-	 * down to one customer's spend or one order's total.
-	 */
-	const MIN_GROUP = 3;
+	const ROWS_MAX_LIMIT = 50;
 
 	/**
 	 * Rows-tool filter fields that point at one person or household rather
@@ -72,6 +79,7 @@ class Abilities {
 	 * Rows-tool filter fields allowed for orders and customers. An allowlist, so
 	 * a field added to the shared registry stays refused here until it's been
 	 * looked at. Products aren't people, so their filters aren't narrowed.
+	 * Rows themselves carry no names, emails, phone numbers or addresses.
 	 */
 	const ROWS_FILTER_FIELDS = array(
 		'orders'    => array( 'order_total', 'gross_total', 'num_items_sold', 'tax_total', 'shipping_total', 'discount_amount', 'status', 'date_created', 'returning_customer', 'currency', 'payment_method', 'billing_country', 'billing_state', 'shipping_country', 'shipping_state', 'attribution_channel', 'attribution_source', 'attribution_campaign', 'attribution_device', 'coupon_code', 'product_id' ),
@@ -79,10 +87,11 @@ class Abilities {
 	);
 
 	/**
-	 * Keys removed from every analytics response, at any depth: per-person
-	 * lists and the identifiers that would point at one person.
+	 * Keys removed from every response, at any depth: per-person lists and the
+	 * identifiers that would name, contact or locate one person. Customer rows
+	 * keep country and state; the city and postcode go.
 	 */
-	const PERSON_KEYS = array( 'top_customers', 'privacy_note', 'customer_id', 'email', 'billing_email', 'first_name', 'last_name', 'phone' );
+	const PERSON_KEYS = array( 'top_customers', 'privacy_note', 'customer_id', 'email', 'billing_email', 'first_name', 'last_name', 'phone', 'city', 'postcode', 'billing_city', 'billing_postcode', 'shipping_city', 'shipping_postcode', 'address_1', 'address_2' );
 
 	/**
 	 * Register the ability category (on `wp_abilities_api_categories_init`).
@@ -95,7 +104,7 @@ class Abilities {
 			self::CATEGORY,
 			array(
 				'label'       => __( 'Briefing for WooCommerce', 'briefing-for-woocommerce' ),
-				'description' => __( 'Read-only store totals for the weekly briefing. Aggregates only: no orders, customers, names or emails.', 'briefing-for-woocommerce' ),
+				'description' => __( 'Read-only store figures, orders and catalogue for the weekly briefing. Never a customer\'s name, email, phone number or address.', 'briefing-for-woocommerce' ),
 			)
 		);
 	}
@@ -126,7 +135,7 @@ class Abilities {
 		self::add(
 			self::TOTALS,
 			__( 'Totals', 'briefing-for-woocommerce' ),
-			__( 'Headline totals for a period against the one before: revenue, orders (with statuses), customers (new and returning), customer value (lifetime and repeat buying, no individual customers), tax (collected, refunded and net, by rate), refunds, customer concentration (share of revenue from the top 10 customers and the top fifth, by spend in the period), fulfilment (hours from payment to completion: median, p90, buckets) or margin (from cost of goods, with how much of revenue has costs entered). Concentration and cohort figures that would describe fewer than 3 customers come back as null. Can\'t answer: who a customer is, or anything about one order or one customer; those stay in the store\'s admin.', 'briefing-for-woocommerce' ),
+			__( 'Headline totals for a period against the one before: revenue, orders (with statuses), customers (new and returning), customer value (lifetime and repeat buying, no individual customers), tax (collected, refunded and net, by rate), refunds, customer concentration (share of revenue from the top 10 customers and the top fifth, by spend in the period), fulfilment (hours from payment to completion: median, p90, buckets) or margin (from cost of goods, with how much of revenue has costs entered). Can\'t answer: who a customer is; names and contact details stay in the store\'s admin.', 'briefing-for-woocommerce' ),
 			array(
 				'type'       => 'object',
 				'required'   => array( 'subject', 'date_start', 'date_end' ),
@@ -143,7 +152,7 @@ class Abilities {
 		self::add(
 			self::BREAKDOWN,
 			__( 'Breakdown', 'briefing-for-woocommerce' ),
-			__( 'One subject broken down by one dimension for a period: revenue by category, country, state (billing state or region), shipping_country, payment or shipping method; attribution by channel, source, campaign or device; products by product or variation; refunds by product, country or customer_type (new or returning); tax by rate; coupons by code; customers by country (new and returning); cohorts of first-time customers by the channel, coupon or product of their first order (repeat rate, average lifetime spend); product_pairs by pair (products bought together); fulfilment by shipping_method. Concentration and cohort figures that would describe fewer than 3 customers come back as null. Can\'t answer: who the customers in a group are, or anything about one order or one customer; those stay in the store\'s admin.', 'briefing-for-woocommerce' ),
+			__( 'One subject broken down by one dimension for a period: revenue by category, country, state (billing state or region), shipping_country, payment or shipping method; attribution by channel, source, campaign or device; products by product or variation; refunds by product, country or customer_type (new or returning); tax by rate; coupons by code; customers by country (new and returning); cohorts of first-time customers by the channel, coupon or product of their first order (repeat rate, average lifetime spend); product_pairs by pair (products bought together); fulfilment by shipping_method. Can\'t answer: who a customer is; names and contact details stay in the store\'s admin.', 'briefing-for-woocommerce' ),
 			array(
 				'type'       => 'object',
 				'required'   => array( 'subject', 'dimension', 'date_start', 'date_end' ),
@@ -239,7 +248,7 @@ class Abilities {
 		self::add(
 			self::ROWS,
 			__( 'Rows', 'briefing-for-woocommerce' ),
-			__( 'Filtered questions the other tools can\'t shape, such as "orders over £100 from Germany with a coupon" or "products over £50 that sold fewer than 3". Orders and customers come back as counts and sums only (mode "aggregate"): never a list, and only the count when fewer than 3 match or all but 1 or 2 match. Products can also be listed (mode "rows", at most 25). Filters can\'t use customer IDs, cities or postcodes: orders filter on totals, items, tax, shipping, discount, status, date_created, returning_customer, currency, payment_method, billing or shipping country and state, attribution, coupon_code and product_id; customers on country, state, lifetime orders and spend, and their registration, last-active and first and last order dates. Dates: at most 366 days, starting no more than 3 years ago and ending no later than today.', 'briefing-for-woocommerce' ),
+			__( 'Filtered questions the other tools can\'t shape, such as "orders over £100 from Germany with a coupon", "products in the men category and what each sold" or "customers who spent over £500 and haven\'t ordered in 90 days". Mode "aggregate" gives counts, sums and shares for everything that matched; mode "rows" lists the top matches (at most 50), each with a link to it in the store\'s admin. Take figures from aggregate, never by adding up rows. Customers are listed as Customer #N, never by name. Products filter on category by its slug. Filters can\'t use customer IDs, cities or postcodes: orders filter on totals, items, tax, shipping, discount, status, date_created, returning_customer, currency, payment_method, billing or shipping country and state, attribution, coupon_code and product_id; customers on country, state, lifetime orders and spend, and their registration, last-active and first and last order dates. Dates: at most 366 days, starting no more than 3 years ago and ending no later than today.', 'briefing-for-woocommerce' ),
 			array(
 				'type'       => 'object',
 				'required'   => array( 'entity', 'date_start', 'date_end' ),
@@ -276,7 +285,7 @@ class Abilities {
 						'type'    => 'integer',
 						'minimum' => 1,
 						'maximum' => self::ROWS_MAX_LIMIT,
-						'default' => 10,
+						'default' => 25,
 					),
 					'orderby'    => array( 'type' => 'string' ),
 					'order'      => array(
@@ -289,6 +298,104 @@ class Abilities {
 				),
 			),
 			array( __CLASS__, 'rows' )
+		);
+
+		$none = array(
+			'type'       => 'object',
+			'properties' => (object) array(),
+		);
+
+		self::add(
+			self::CATALOG,
+			__( 'Catalogue', 'briefing-for-woocommerce' ),
+			__( 'How the catalogue is organised: the category tree (with each category\'s slug and product count), attribute terms, and how many products of each type. Read it to find the slug the rows and search tools filter categories by.', 'briefing-for-woocommerce' ),
+			$none,
+			array( __CLASS__, 'catalog' )
+		);
+
+		self::add(
+			self::SEARCH_PRODUCTS,
+			__( 'Search products', 'briefing-for-woocommerce' ),
+			__( 'Search the catalogue by name or description, or list a category by its slug, with each product\'s details, completeness score and what it\'s missing. For sales by product, use the breakdown or rows tools.', 'briefing-for-woocommerce' ),
+			array(
+				'type'       => 'object',
+				'properties' => array(
+					'query'    => array(
+						'type'        => 'string',
+						'description' => 'Words to find in product names or descriptions.',
+					),
+					'category' => array(
+						'type'        => 'string',
+						'description' => 'A category slug.',
+					),
+					'page'     => array(
+						'type'    => 'integer',
+						'minimum' => 1,
+						'default' => 1,
+					),
+					'per_page' => array(
+						'type'    => 'integer',
+						'minimum' => 1,
+						'maximum' => 50,
+						'default' => 20,
+					),
+				),
+			),
+			array( __CLASS__, 'search_products' )
+		);
+
+		self::add(
+			self::PRODUCT_DETAILS,
+			__( 'Product details', 'briefing-for-woocommerce' ),
+			__( 'Everything about one product: description, attributes, images, categories, related products and its completeness score.', 'briefing-for-woocommerce' ),
+			array(
+				'type'       => 'object',
+				'required'   => array( 'product_id' ),
+				'properties' => array(
+					'product_id' => array(
+						'type'    => 'integer',
+						'minimum' => 1,
+					),
+				),
+			),
+			array( __CLASS__, 'product_details' )
+		);
+
+		self::add(
+			self::READINESS_SCORE,
+			__( 'AI readiness score', 'briefing-for-woocommerce' ),
+			__( 'How ready the store is for AI shopping assistants to understand and recommend it, from 0 to 100, with a score for each factor: product completeness, structured data, store policies and content quality.', 'briefing-for-woocommerce' ),
+			$none,
+			array( __CLASS__, 'readiness_score' )
+		);
+
+		self::add(
+			self::RECOMMENDATIONS,
+			__( 'AI readiness recommendations', 'briefing-for-woocommerce' ),
+			__( 'The changes that would raise the AI readiness score most, highest impact first.', 'briefing-for-woocommerce' ),
+			$none,
+			array( __CLASS__, 'recommendations' )
+		);
+
+		self::add(
+			self::SUGGEST_IMPROVEMENTS,
+			__( 'Suggest improvements', 'briefing-for-woocommerce' ),
+			__( 'Specific improvements for one product (give product_id) or the whole store: descriptions, images, SEO or attributes.', 'briefing-for-woocommerce' ),
+			array(
+				'type'       => 'object',
+				'properties' => array(
+					'product_id' => array(
+						'type'    => 'integer',
+						'minimum' => 1,
+					),
+					'focus'      => array(
+						'type'    => 'string',
+						'enum'    => array( 'description', 'images', 'seo', 'attributes', 'all' ),
+						'default' => 'all',
+					),
+				),
+			),
+			array( __CLASS__, 'suggest_improvements' )
 		);
 	}
 
@@ -344,11 +451,7 @@ class Abilities {
 	 * @return array|\WP_Error
 	 */
 	public static function totals( $input ) {
-		$result = AnalyticsTotalsAbility::execute( self::pick( $input, array( 'subject', 'date_start', 'date_end', 'compare' ) ) );
-		if ( is_array( $result ) && 'customer_concentration' === ( $input['subject'] ?? '' ) ) {
-			$result = self::concentration_without_small_groups( $result );
-		}
-		return self::without_people( $result );
+		return self::without_people( AnalyticsTotalsAbility::execute( self::pick( $input, array( 'subject', 'date_start', 'date_end', 'compare' ) ) ) );
 	}
 
 	/**
@@ -358,11 +461,7 @@ class Abilities {
 	 * @return array|\WP_Error
 	 */
 	public static function breakdown( $input ) {
-		$result = AnalyticsBreakdownAbility::execute( self::pick( $input, array( 'subject', 'dimension', 'limit', 'date_start', 'date_end', 'compare' ) ) );
-		if ( is_array( $result ) && 'cohorts' === ( $input['subject'] ?? '' ) ) {
-			$result = self::cohorts_without_small_groups( $result );
-		}
-		return self::without_people( $result );
+		return self::without_people( AnalyticsBreakdownAbility::execute( self::pick( $input, array( 'subject', 'dimension', 'limit', 'date_start', 'date_end', 'compare' ) ) ) );
 	}
 
 	/**
@@ -454,9 +553,8 @@ class Abilities {
 	}
 
 	/**
-	 * `briefing/rows`: the shared rows tool, with its dates capped, product
-	 * rows only, no identifying filters, and sums withheld for groups smaller
-	 * than MIN_GROUP.
+	 * `briefing/rows`: the shared rows tool, with its dates capped and no
+	 * identifying filters.
 	 *
 	 * @param array $input Validated input.
 	 * @return array|\WP_Error
@@ -469,18 +567,6 @@ class Abilities {
 		$dates = self::check_rows_dates( $input['date_start'] ?? '', $input['date_end'] ?? '' );
 		if ( is_wp_error( $dates ) ) {
 			return $dates;
-		}
-
-		if ( 'aggregate' !== $mode && 'products' !== $entity ) {
-			return new \WP_Error(
-				'briefing_rows_aggregate_only',
-				sprintf(
-					/* translators: %s: orders or customers. */
-					__( 'Briefing for WooCommerce reads %s as totals only. Use mode "aggregate" for counts and sums; individual orders and customers stay in the store\'s admin.', 'briefing-for-woocommerce' ),
-					$entity
-				),
-				array( 'status' => 400 )
-			);
 		}
 
 		$filters = is_array( $input['filters'] ?? null ) ? $input['filters'] : array();
@@ -512,27 +598,103 @@ class Abilities {
 			}
 		}
 
-		$result = AnalyticsRowsAbility::execute(
-			array(
-				'entity'     => $entity,
-				'mode'       => $mode,
-				'filters'    => $filters,
-				'match'      => $input['match'] ?? 'all',
-				'limit'      => min( self::ROWS_MAX_LIMIT, (int) ( $input['limit'] ?? 10 ) ),
-				'orderby'    => $input['orderby'] ?? '',
-				'order'      => $input['order'] ?? 'DESC',
-				'date_start' => $dates['start'],
-				'date_end'   => $dates['end'],
+		return self::without_people(
+			AnalyticsRowsAbility::execute(
+				array(
+					'entity'     => $entity,
+					'mode'       => $mode,
+					'filters'    => $filters,
+					'match'      => $input['match'] ?? 'all',
+					'limit'      => min( self::ROWS_MAX_LIMIT, (int) ( $input['limit'] ?? 25 ) ),
+					'orderby'    => $input['orderby'] ?? '',
+					'order'      => $input['order'] ?? 'DESC',
+					'date_start' => $dates['start'],
+					'date_end'   => $dates['end'],
+				)
 			)
 		);
-		if ( is_wp_error( $result ) ) {
-			return $result;
+	}
+
+	/**
+	 * `briefing/catalog`.
+	 *
+	 * @return array
+	 */
+	public static function catalog() {
+		return self::without_people( StoreKnowledge::get_catalog_schema( self::knowledge() ) );
+	}
+
+	/**
+	 * `briefing/search-products`.
+	 *
+	 * @param array $input Validated input.
+	 * @return array|null
+	 */
+	public static function search_products( $input ) {
+		$input = is_array( $input ) ? $input : array();
+		return self::without_people(
+			StoreKnowledge::get_products(
+				array(
+					'search'   => $input['query'] ?? null,
+					'category' => $input['category'] ?? null,
+					'page'     => $input['page'] ?? 1,
+					'per_page' => $input['per_page'] ?? 20,
+				),
+				self::knowledge()
+			)
+		);
+	}
+
+	/**
+	 * `briefing/product-details`.
+	 *
+	 * @param array $input Validated input.
+	 * @return array|\WP_Error|null
+	 */
+	public static function product_details( $input ) {
+		return self::without_people( StoreKnowledge::get_product( absint( $input['product_id'] ?? 0 ), self::knowledge() ) );
+	}
+
+	/**
+	 * `briefing/readiness-score`.
+	 *
+	 * @return array
+	 */
+	public static function readiness_score() {
+		return self::without_people( StoreKnowledge::get_readiness_score( self::knowledge() ) );
+	}
+
+	/**
+	 * `briefing/recommendations`.
+	 *
+	 * @return array
+	 */
+	public static function recommendations() {
+		return self::without_people( StoreKnowledge::get_recommendations( self::knowledge() ) );
+	}
+
+	/**
+	 * `briefing/suggest-improvements`.
+	 *
+	 * @param array $input Validated input.
+	 * @return array|\WP_Error
+	 */
+	public static function suggest_improvements( $input ) {
+		return self::without_people( StoreKnowledge::suggest_improvements( self::pick( $input, array( 'product_id', 'focus' ) ), self::knowledge() ) );
+	}
+
+	/**
+	 * The store knowledge consumer, with its providers registered (once).
+	 *
+	 * @return string
+	 */
+	private static function knowledge() {
+		static $registered = false;
+		if ( ! $registered ) {
+			StoreKnowledge::register_default_providers( self::KNOWLEDGE_CONSUMER );
+			$registered = true;
 		}
-		if ( 'products' !== $entity ) {
-			$result['rows'] = null;
-			$result         = self::without_small_groups( $result );
-		}
-		return self::without_people( $result );
+		return self::KNOWLEDGE_CONSUMER;
 	}
 
 	/**
@@ -589,171 +751,6 @@ class Abilities {
 	 */
 	private static function rows_date_error( $message ) {
 		return new \WP_Error( 'briefing_rows_date_range', $message, array( 'status' => 400 ) );
-	}
-
-	/**
-	 * Withhold sums for an orders or customers aggregate when they would describe
-	 * fewer than MIN_GROUP orders or customers, directly or by subtracting one
-	 * block of the response from another: keep the counts, drop the money.
-	 *
-	 * The summary goes when the filter matches fewer than MIN_GROUP, or leaves
-	 * fewer than MIN_GROUP out of the universe (whose totals stay, since they're
-	 * the store's own totals). Pipeline (on-hold) goes down to its count when
-	 * it's that small, and admin_equivalent (paid, on-hold and refunded) when
-	 * what it adds to the summary, with or without the pipeline, is.
-	 *
-	 * @param array $result Rows-tool aggregate response.
-	 * @return array
-	 */
-	public static function without_small_groups( array $result ) {
-		$matched  = (int) ( $result['summary']['matched_count'] ?? 0 );
-		$universe = (int) ( $result['universe']['orders_count_in_period'] ?? $result['universe']['active_customers_in_period'] ?? 0 );
-
-		if ( self::is_small_group( $matched ) || self::is_small_group( $universe - $matched ) ) {
-			$result['summary']           = array( 'matched_count' => $matched );
-			$result['share_of_universe'] = array_intersect_key(
-				(array) ( $result['share_of_universe'] ?? array() ),
-				array_flip( array( 'share_of_orders_percent', 'share_of_customers_percent' ) )
-			);
-			$result['pipeline']          = null;
-			$result['admin_equivalent']  = null;
-			$result['note']              = sprintf(
-				'%d matched out of %d, so only the count is given: sums for this group, or for the %d left out, would describe fewer than %d customers or orders.',
-				$matched,
-				$universe,
-				max( 0, $universe - $matched ),
-				self::MIN_GROUP
-			);
-			return $result;
-		}
-
-		$pipeline = is_array( $result['pipeline'] ?? null ) ? (int) ( $result['pipeline']['matched_count'] ?? 0 ) : 0;
-		$admin    = is_array( $result['admin_equivalent'] ?? null ) ? (int) ( $result['admin_equivalent']['matched_count'] ?? 0 ) : 0;
-		$added    = $admin - $matched;
-		if ( self::is_small_group( $pipeline ) ) {
-			$result['pipeline'] = array( 'matched_count' => $pipeline );
-		}
-		if ( $admin && ( self::is_small_group( $added ) || self::is_small_group( $added - $pipeline ) ) ) {
-			$result['admin_equivalent'] = array( 'matched_count' => $admin );
-		}
-		return $result;
-	}
-
-	/**
-	 * Customer concentration with spend figures that would describe fewer than
-	 * MIN_GROUP customers set to null: the average and median when there are
-	 * that few customers, the top-fifth figures when the top fifth is that few,
-	 * and the top-10 figures when the customers outside the top 10 are. The
-	 * period's revenue and the counts stay. Changes against the previous period
-	 * go for any figure withheld on either side.
-	 *
-	 * @param array $result Totals response for customer_concentration.
-	 * @return array
-	 */
-	public static function concentration_without_small_groups( array $result ) {
-		$withheld = array();
-		if ( is_array( $result['metrics'] ?? null ) ) {
-			$result['metrics'] = self::concentration_metrics_without_small_groups( $result['metrics'], $withheld );
-		}
-		if ( is_array( $result['comparison']['metrics'] ?? null ) ) {
-			$result['comparison']['metrics'] = self::concentration_metrics_without_small_groups( $result['comparison']['metrics'], $withheld );
-			foreach ( $withheld as $key ) {
-				if ( isset( $result['comparison']['changes'] ) && array_key_exists( $key, $result['comparison']['changes'] ) ) {
-					$result['comparison']['changes'][ $key ] = null;
-				}
-			}
-		}
-		if ( $withheld ) {
-			$result['note'] = trim( ( $result['note'] ?? '' ) . ' ' . self::small_group_note( 'customers' ) );
-		}
-		return $result;
-	}
-
-	/**
-	 * One concentration metrics block, with spend figures for fewer than
-	 * MIN_GROUP customers set to null.
-	 *
-	 * @param array $metrics  Metrics block.
-	 * @param array $withheld Keys withheld so far; added to.
-	 * @return array
-	 */
-	private static function concentration_metrics_without_small_groups( array $metrics, array &$withheld ) {
-		$count = (int) ( $metrics['customers_count'] ?? 0 );
-		$hide  = array();
-		if ( self::is_small_group( $count ) ) {
-			$hide = array( 'avg_spend_per_customer', 'median_spend_per_customer', 'top_10_revenue', 'top_10_share_percent', 'top_20_percent_revenue', 'top_20_percent_share_percent' );
-		} else {
-			if ( self::is_small_group( (int) ( $metrics['top_20_percent_customers_count'] ?? 0 ) ) ) {
-				$hide = array_merge( $hide, array( 'top_20_percent_revenue', 'top_20_percent_share_percent' ) );
-			}
-			if ( self::is_small_group( $count - (int) ( $metrics['top_10_customers_count'] ?? 0 ) ) ) {
-				$hide = array_merge( $hide, array( 'top_10_revenue', 'top_10_share_percent' ) );
-			}
-		}
-		foreach ( $hide as $key ) {
-			if ( array_key_exists( $key, $metrics ) ) {
-				$metrics[ $key ] = null;
-			}
-		}
-		$withheld = array_values( array_unique( array_merge( $withheld, $hide ) ) );
-		return $metrics;
-	}
-
-	/**
-	 * Acquisition cohorts with the repeat and lifetime figures set to null for
-	 * any cohort of fewer than MIN_GROUP customers, and for the totals when the
-	 * cohort is that small or the customers outside the listed cohorts are (the
-	 * totals less the listed cohorts would give theirs). Counts stay.
-	 *
-	 * @param array $result Breakdown response for cohorts.
-	 * @return array
-	 */
-	public static function cohorts_without_small_groups( array $result ) {
-		$keys     = array( 'repeat_customers', 'repeat_rate_percent', 'avg_lifetime_spend', 'avg_lifetime_orders' );
-		$withheld = false;
-		$listed   = 0;
-		foreach ( (array) ( $result['top_groups'] ?? array() ) as $i => $row ) {
-			$customers = (int) ( $row['customers_count'] ?? 0 );
-			if ( self::is_small_group( $customers ) ) {
-				foreach ( $keys as $key ) {
-					$result['top_groups'][ $i ][ $key ] = null;
-				}
-				$withheld = true;
-			} else {
-				$listed += $customers;
-			}
-		}
-		$size = (int) ( $result['totals']['customers_count'] ?? 0 );
-		if ( is_array( $result['totals'] ?? null ) && ( self::is_small_group( $size ) || self::is_small_group( $size - $listed ) ) ) {
-			foreach ( $keys as $key ) {
-				$result['totals'][ $key ] = null;
-			}
-			$withheld = true;
-		}
-		if ( $withheld ) {
-			$result['note'] = trim( ( $result['note'] ?? '' ) . ' ' . self::small_group_note( 'customers' ) );
-		}
-		return $result;
-	}
-
-	/**
-	 * Note added when figures are withheld for a small group.
-	 *
-	 * @param string $what customers or orders.
-	 * @return string
-	 */
-	private static function small_group_note( $what ) {
-		return sprintf( 'Figures that would describe fewer than %d %s are null: with this few, they would be about individual %s.', self::MIN_GROUP, $what, $what );
-	}
-
-	/**
-	 * Whether a count is a group too small to report sums for (zero isn't).
-	 *
-	 * @param int $count Count.
-	 * @return bool
-	 */
-	private static function is_small_group( $count ) {
-		return $count > 0 && $count < self::MIN_GROUP;
 	}
 
 	/**

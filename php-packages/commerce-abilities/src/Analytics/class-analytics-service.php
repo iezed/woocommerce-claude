@@ -2474,8 +2474,11 @@ class AnalyticsService {
 	 * Facebook.com", "Source: woocommerce.com", "Organic: Google"), so grouping
 	 * by the origin gave one "channel" per site. The source type gives the
 	 * channel; a tagged link's medium refines it (email → Email, cpc → Paid
-	 * Search). Orders with no recognised source type fall back to the origin,
-	 * which is what stores and fixtures that write channel names there expect.
+	 * Search). An `unknown` source type is no attribution at all, so it lands
+	 * in Unassigned. Orders with no recognised source type fall back to the
+	 * origin, which is what stores and fixtures that write channel names there
+	 * expect. Source types are matched lowercased, so the result doesn't depend
+	 * on the meta table's collation.
 	 *
 	 * @param string $origin Alias of the _wc_order_attribution_origin join.
 	 * @param string $type   Alias of the _wc_order_attribution_source_type join.
@@ -2487,14 +2490,41 @@ class AnalyticsService {
 		foreach ( self::$utm_medium_channels as $channel => $mediums ) {
 			$tagged .= " WHEN LOWER(COALESCE({$medium}.meta_value, '')) IN ('" . implode( "', '", $mediums ) . "') THEN '{$channel}'";
 		}
-		return "CASE {$type}.meta_value"
+		return "CASE LOWER(COALESCE({$type}.meta_value, ''))"
 			. " WHEN 'typein' THEN 'Direct'"
 			. " WHEN 'organic' THEN 'Organic Search'"
 			. " WHEN 'referral' THEN 'Referral'"
 			. " WHEN 'admin' THEN 'Web admin'"
 			. " WHEN 'mobile_app' THEN 'Mobile app'"
+			. " WHEN 'pos' THEN 'Point of Sale'"
+			. " WHEN 'unknown' THEN NULL"
 			. " WHEN 'utm' THEN CASE{$tagged} ELSE 'Tagged links' END"
 			. " ELSE {$origin}.meta_value END";
+	}
+
+	/**
+	 * LEFT JOINs to the attribution meta a grouping needs, with their meta_key
+	 * values for the prepared statement. Every dimension joins (channel_source
+	 * needs channel and source together), except the source type, which only
+	 * the channel needs.
+	 *
+	 * @param string $group_by Dimension being grouped by.
+	 * @param array  $source   Meta table and id column (get_order_meta_source()).
+	 * @param string $os_table Order stats table.
+	 * @return array{0: string, 1: array} JOIN SQL and its values.
+	 */
+	private static function attribution_meta_joins( $group_by, $source, $os_table ) {
+		$meta_joins  = '';
+		$join_values = array();
+		foreach ( self::$attribution_meta_keys as $alias_suffix => $meta_key ) {
+			if ( 'source_type' === $alias_suffix && ! in_array( $group_by, array( 'channel', 'channel_source' ), true ) ) {
+				continue;
+			}
+			$alias         = 'attr_' . $alias_suffix;
+			$meta_joins   .= " LEFT JOIN {$source['table']} {$alias} ON {$alias}.{$source['id_column']} = {$os_table}.order_id AND {$alias}.meta_key = %s";
+			$join_values[] = $meta_key;
+		}
+		return array( $meta_joins, $join_values );
 	}
 
 	/**
@@ -2512,6 +2542,7 @@ class AnalyticsService {
 		'Email',
 		'Mobile app',
 		'Mobile Push Notifications',
+		'Point of Sale',
 		'SMS',
 		'Unassigned',
 		'Web admin',
@@ -2634,10 +2665,12 @@ class AnalyticsService {
 					self::$channels_without_source
 				);
 				$list    = implode( ', ', $escaped );
+				// The channel, then ": source" unless there's no source or the
+				// channel never carries one (CONCAT with a NULL source gives
+				// NULL, which COALESCE turns into nothing), so the channel is
+				// written out twice rather than three times.
 				$channel = self::attribution_channel_sql( 'attr_channel', 'attr_source_type', 'attr_medium' );
-				return "CASE WHEN attr_source.meta_value IS NULL OR attr_source.meta_value = '' OR ({$channel}) IN ( {$list} )"
-					. " THEN ({$channel})"
-					. " ELSE CONCAT(({$channel}), ': ', attr_source.meta_value) END";
+				return "CONCAT(({$channel}), COALESCE(CASE WHEN ({$channel}) IN ( {$list} ) THEN NULL ELSE CONCAT(': ', NULLIF(attr_source.meta_value, '')) END, ''))";
 			default:
 				return null;
 		}
@@ -2894,16 +2927,9 @@ class AnalyticsService {
 		}
 
 		// Build LEFT JOINs to attribution meta. Each dimension is its own join
-		// against the meta table with a specific meta_key filter. We always
-		// join all four dimensions because channel_source needs both channel
-		// and source; the query plan stays cheap thanks to the meta_key index.
-		$meta_joins  = '';
-		$join_values = array();
-		foreach ( self::$attribution_meta_keys as $alias_suffix => $meta_key ) {
-			$alias         = 'attr_' . $alias_suffix;
-			$meta_joins   .= " LEFT JOIN {$source['table']} {$alias} ON {$alias}.{$source['id_column']} = {$os_table}.order_id AND {$alias}.meta_key = %s";
-			$join_values[] = $meta_key;
-		}
+		// against the meta table with a specific meta_key filter; the query
+		// plan stays cheap thanks to the meta_key index.
+		list( $meta_joins, $join_values ) = self::attribution_meta_joins( $group_by, $source, $os_table );
 
 		// Whitelist orderby.
 		$orderby_map = array(
@@ -3038,13 +3064,7 @@ class AnalyticsService {
 			return self::empty_attribution_totals();
 		}
 
-		$meta_joins  = '';
-		$join_values = array();
-		foreach ( self::$attribution_meta_keys as $alias_suffix => $meta_key ) {
-			$alias         = 'attr_' . $alias_suffix;
-			$meta_joins   .= " LEFT JOIN {$source['table']} {$alias} ON {$alias}.{$source['id_column']} = {$os_table}.order_id AND {$alias}.meta_key = %s";
-			$join_values[] = $meta_key;
-		}
+		list( $meta_joins, $join_values ) = self::attribution_meta_joins( $group_by, $source, $os_table );
 
 		$os_report_range  = self::get_report_date_range_sql( $os_table . '.', $date_start, $date_end );
 		$admin_date_guard = self::get_admin_date_guard_sql( $os_table . '.' );

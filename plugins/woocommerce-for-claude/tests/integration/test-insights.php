@@ -476,6 +476,55 @@ class Test_Insights extends WP_UnitTestCase {
 	}
 
 	/**
+	 * Cohorts by channel use the same channel as the attribution breakdown:
+	 * worked out from the first order's source type, so two referral sites
+	 * are one Referral cohort, not two.
+	 */
+	public function test_cohort_channel_comes_from_source_type() {
+		$mug = $this->seed_simple_product(
+			array(
+				'name'  => 'Referral mug',
+				'price' => 10,
+			)
+		);
+		foreach ( array(
+			'Referral: Facebook.com' => 'facebook.com',
+			'Referral: Claude.ai'    => 'claude.ai',
+		) as $origin => $site ) {
+			$this->order(
+				$this->seed_customer(),
+				0,
+				'2026-03-03 10:00:00',
+				array(),
+				array( $mug ),
+				array(
+					'channel'     => $origin,
+					'source_type' => 'referral',
+					'source'      => $site,
+				)
+			);
+		}
+		$this->order(
+			$this->seed_customer(),
+			0,
+			'2026-03-04 10:00:00',
+			array(),
+			array( $mug ),
+			array(
+				'channel'     => 'Source: newsletter',
+				'source_type' => 'utm',
+				'source'      => 'newsletter',
+				'medium'      => 'email',
+			)
+		);
+
+		$rows = $this->by_key( $this->breakdown( 'cohorts', 'channel' )['top_groups'] );
+		$this->assertSame( 2, $rows['Referral']['customers_count'] );
+		$this->assertSame( 1, $rows['Email']['customers_count'] );
+		$this->assertArrayNotHasKey( 'Referral: Facebook.com', $rows );
+	}
+
+	/**
 	 * A paid order.
 	 *
 	 * @param int    $customer    WP user ID.

@@ -3,7 +3,7 @@
  * Plugin Name: Briefing for WooCommerce
  * Plugin URI: https://briefing.woocommerce.com/
  * Description: Lets Briefing for WooCommerce read your store's figures, orders and catalogue, with a read-only key you approve. Never a customer's name, email, phone number or address.
- * Version: 0.5.0
+ * Version: 0.5.1
  * Author: Automattic
  * Author URI: https://automattic.com/
  * Text Domain: briefing-for-woocommerce
@@ -22,7 +22,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'BRIEFING_FOR_WOOCOMMERCE_VERSION', '0.5.0' );
+define( 'BRIEFING_FOR_WOOCOMMERCE_VERSION', '0.5.1' );
 define( 'BRIEFING_FOR_WOOCOMMERCE_PLUGIN_FILE', __FILE__ );
 define( 'BRIEFING_FOR_WOOCOMMERCE_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 
